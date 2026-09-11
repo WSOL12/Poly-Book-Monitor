@@ -1,0 +1,146 @@
+export type TeamInfo = {
+  name: string;
+  alias?: string | null;
+  logo?: string | null;
+  abbreviation?: string | null;
+  ordering?: string | null;
+};
+
+export type SetCell = {
+  games: number;
+  tiebreak?: number;
+};
+
+export type ParsedScore = {
+  mode: "simple" | "sets";
+  homeTotal: number;
+  awayTotal: number;
+  homeSets: SetCell[];
+  awaySets: SetCell[];
+};
+
+function parseSetPart(part: string): { home: SetCell; away: SetCell } | null {
+  const m = part.trim().match(/^(\d+)-(\d+)(?:\((\d+)-(\d+)\))?$/);
+  if (!m) return null;
+  const homeGames = Number(m[1]);
+  const awayGames = Number(m[2]);
+  const home: SetCell = { games: homeGames };
+  const away: SetCell = { games: awayGames };
+  if (m[3] != null && m[4] != null) {
+    home.tiebreak = Number(m[3]);
+    away.tiebreak = Number(m[4]);
+  }
+  return { home, away };
+}
+
+export function parseScoreString(score: string | null | undefined): ParsedScore | null {
+  if (!score?.trim()) return null;
+  const raw = score.trim();
+  if (raw.includes(",")) {
+    const homeSets: SetCell[] = [];
+    const awaySets: SetCell[] = [];
+    for (const part of raw.split(",")) {
+      const set = parseSetPart(part);
+      if (!set) return null;
+      homeSets.push(set.home);
+      awaySets.push(set.away);
+    }
+    if (!homeSets.length) return null;
+    const last = homeSets.length - 1;
+    return {
+      mode: "sets",
+      homeTotal: homeSets[last]?.games ?? 0,
+      awayTotal: awaySets[last]?.games ?? 0,
+      homeSets,
+      awaySets,
+    };
+  }
+  const simple = raw.match(/^(\d+)-(\d+)$/);
+  if (!simple) return null;
+  const homeTotal = Number(simple[1]);
+  const awayTotal = Number(simple[2]);
+  return {
+    mode: "simple",
+    homeTotal,
+    awayTotal,
+    homeSets: [{ games: homeTotal }],
+    awaySets: [{ games: awayTotal }],
+  };
+}
+
+function sameTeamName(a: string | null | undefined, b: string | null | undefined) {
+  if (!a || !b) return false;
+  const na = a.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const nb = b.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+export function periodBadge(args: {
+  period?: string | null;
+  elapsed?: string | null;
+  live?: boolean;
+  ended?: boolean;
+  closed?: boolean;
+}) {
+  const period = args.period?.trim() || "";
+  const elapsed = args.elapsed?.trim() || "";
+  const finalPeriod = period === "VFT" || period === "FT" || period === "FINAL" || period === "F";
+  // Prefer the scrubbed frame's period so early frames don't say FINAL over 0-0.
+  if (finalPeriod) return "FINAL";
+  if (period) {
+    if (elapsed) return `${period} · ${elapsed}`;
+    return period;
+  }
+  if (args.ended || args.closed) return "FINAL";
+  if (args.live) return "LIVE";
+  return null;
+}
+
+/** Left/right follow the event title ("A vs B"), not Gamma home/away. */
+export function teamRows(teams: TeamInfo[] | undefined, title: string) {
+  const parts = title.split(/ vs\.? /i).map((s) => s.trim());
+  const leftName = parts[0] || "Home";
+  const rightName = parts[1] || "Away";
+
+  const match = (name: string) =>
+    teams?.find(
+      (t) =>
+        sameTeamName(t.name, name) ||
+        sameTeamName(t.alias, name) ||
+        sameTeamName(t.abbreviation, name)
+    );
+
+  const left = match(leftName);
+  const right = match(rightName);
+
+  return {
+    home: {
+      name: left?.name ?? leftName,
+      alias: left?.alias ?? null,
+      logo: left?.logo ?? null,
+      abbreviation: left?.abbreviation ?? null,
+      ordering: left?.ordering ?? "left",
+    },
+    away: {
+      name: right?.name ?? rightName,
+      alias: right?.alias ?? null,
+      logo: right?.logo ?? null,
+      abbreviation: right?.abbreviation ?? null,
+      ordering: right?.ordering ?? "right",
+    },
+  };
+}
+
+export function scoreAtTime<T extends { capturedAt: number; score: string | null }>(
+  rows: T[],
+  atMs: number
+): T | null {
+  if (!rows.length) return null;
+  let best: T | null = null;
+  for (const row of rows) {
+    if (row.capturedAt <= atMs) best = row;
+    else break;
+  }
+  return best ?? rows[0] ?? null;
+}
