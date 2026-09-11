@@ -298,7 +298,9 @@ export function getEvent(eventId: string) {
            SELECT id FROM book_snapshots WHERE token_id = t.token_id ORDER BY captured_at DESC LIMIT 1
          )
          WHERE t.event_id = ?
-         ORDER BY t.market_type, COALESCE(t.line, '0'), t.side`
+         ORDER BY t.market_type, COALESCE(t.line, '0'),
+           CASE t.side WHEN 'yes' THEN 0 WHEN 'over' THEN 0 WHEN 'home' THEN 0 WHEN 'no' THEN 1 WHEN 'under' THEN 1 ELSE 2 END,
+           t.side`
       )
       .all(eventId) as Array<
         TokenRow & { marketId: string; marketType: "moneyline" | "total" | "weather" }
@@ -494,17 +496,28 @@ export function getEventQuoteSeries(eventId: string): Record<
 
     const startMs = event?.startTime ? Date.parse(event.startTime) : NaN;
     const finishMs = event?.finishedAt != null ? Number(event.finishedAt) : NaN;
-    const from = Number.isFinite(startMs) ? Math.max(span.a, startMs - 5 * 60_000) : span.a;
-    const to = Number.isFinite(finishMs) ? Math.min(span.b, finishMs + 10 * 60_000) : span.b;
-    const lo = Math.min(from, to);
-    const hi = Math.max(from, to);
-    const TARGET = 360;
+    // Prefer full recording span so sidebar tracks the scrubber (weather often moves
+    // outside a tight kickoff→finish window; No tokens may only exist late).
+    let lo = span.a;
+    let hi = span.b;
+    if (Number.isFinite(startMs) && Number.isFinite(finishMs) && finishMs > startMs) {
+      const matchLo = Math.max(span.a, startMs - 5 * 60_000);
+      const matchHi = Math.min(span.b, finishMs + 10 * 60_000);
+      // If match window covers most of the recording, use full span anyway.
+      if (matchHi - matchLo >= 0.35 * (span.b - span.a)) {
+        lo = span.a;
+        hi = span.b;
+      } else {
+        lo = Math.min(matchLo, span.a);
+        hi = Math.max(matchHi, span.b);
+      }
+    }
+    const TARGET = 720;
     const step = Math.max(1_000, Math.floor((hi - lo) / Math.max(1, TARGET - 1)));
 
     const atTimes: number[] = [];
     for (let t = lo; t <= hi; t += step) atTimes.push(t);
     if (atTimes[atTimes.length - 1] !== hi) atTimes.push(hi);
-    // Always include absolute first/last snap times so scrub edges resolve.
     if (atTimes[0] !== span.a) atTimes.unshift(span.a);
     if (atTimes[atTimes.length - 1] !== span.b) atTimes.push(span.b);
 
@@ -524,19 +537,20 @@ export function getEventQuoteSeries(eventId: string): Record<
     for (const { tokenId } of tokens) {
       const series: Array<{ capturedAt: number; bestBid: number | null; bestAsk: number | null }> =
         [];
+      let sinceKeep = 0;
       for (const at of atTimes) {
         const row = stmt.get(tokenId, at) as
           | { bestBid: number | null; bestAsk: number | null; capturedAt: number }
           | undefined;
         if (!row) continue;
         const prev = series[series.length - 1];
-        if (
-          prev &&
-          prev.bestBid === row.bestBid &&
-          prev.bestAsk === row.bestAsk
-        ) {
-          continue;
-        }
+        const changed =
+          !prev || prev.bestBid !== row.bestBid || prev.bestAsk !== row.bestAsk;
+        // Keep quote changes; also a heartbeat so long flat stretches still scrub smoothly.
+        sinceKeep++;
+        if (!changed && sinceKeep < 8) continue;
+        sinceKeep = 0;
+        if (prev && prev.capturedAt === row.capturedAt) continue;
         series.push({
           capturedAt: row.capturedAt,
           bestBid: row.bestBid,

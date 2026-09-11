@@ -111,6 +111,11 @@ export default function EventDetail({ eventId }: { eventId: string }) {
     [data]
   );
 
+  const defaultTokenId =
+    allTokens.find((t) => t.marketType === "weather" && t.side === "yes")?.tokenId ??
+    allTokens.find((t) => t.side === "yes" || t.side === "over" || t.side === "home")?.tokenId ??
+    allTokens[0]?.tokenId;
+
   const live = data ? isEventLive(data) : false;
   const sportsData = sports.data?.sports;
 
@@ -162,7 +167,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                 matchStart={data.startTime}
                 matchEnd={data.finishedAt}
                 onFrame={onFrame}
-                tokenId={tokenId || allTokens[0]?.tokenId}
+                tokenId={tokenId || defaultTokenId}
                 onTokenChange={setTokenId}
                 frameQuotes={quoteById}
               />
@@ -201,10 +206,17 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                           : `O/U ${market.line ?? ""}`}
                     </div>
                     <div className="aside-outcomes">
-                      {market.tokens.map((token) => {
+                      {[...market.tokens]
+                        .sort((a, b) => {
+                          const rank = (s: string) =>
+                            s === "yes" || s === "over" || s === "home" ? 0 : s === "no" || s === "under" || s === "away" ? 1 : 2;
+                          return rank(a.side) - rank(b.side);
+                        })
+                        .map((token) => {
                         const q = quoteById.get(token.tokenId);
-                        const bid = q?.bestBid ?? token.lastBid;
-                        const ask = q?.bestAsk ?? token.lastAsk;
+                        // Once quote series is loaded for this token, use it (even if a side is null).
+                        const bid = q ? q.bestBid : token.lastBid;
+                        const ask = q ? q.bestAsk : token.lastAsk;
                         const name =
                           market.marketType === "weather"
                             ? token.side === "no"
@@ -215,7 +227,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                           <button
                             key={token.tokenId}
                             type="button"
-                            className={`aside-outcome ${token.tokenId === (tokenId || allTokens[0]?.tokenId) ? "aside-outcome-on" : ""}`}
+                            className={`aside-outcome ${token.tokenId === (tokenId || defaultTokenId) ? "aside-outcome-on" : ""}`}
                             onClick={() => setTokenId(token.tokenId)}
                           >
                             <span>{name}</span>

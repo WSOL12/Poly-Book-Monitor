@@ -300,14 +300,21 @@ export function OrderbookScrubber({
   };
 
   const beginFineDrag = () => {
-    const bounds = computeFineWindow(snapshots, safeIdx, fineHalfMs);
-    fineLockRef.current = bounds;
-    setFineAnchorIdx(safeIdx);
+    const pinned = computeFineWindow(snapshots, fineAnchorIdx, fineHalfMs);
+    if (safeIdx < pinned.lo || safeIdx > pinned.hi) {
+      // Outside the pinned window — move the window once under the current frame.
+      const bounds = computeFineWindow(snapshots, safeIdx, fineHalfMs);
+      fineLockRef.current = bounds;
+      setFineAnchorIdx(safeIdx);
+      return;
+    }
+    // Keep the existing window so the thumb can leave center while dragging.
+    fineLockRef.current = pinned;
   };
 
   const endFineDrag = () => {
+    // Unlock only — do NOT re-center the window or the thumb jumps back to middle.
     fineLockRef.current = null;
-    setFineAnchorIdx(safeIdx);
   };
 
   const scrubFineRel = (rel: number) => {

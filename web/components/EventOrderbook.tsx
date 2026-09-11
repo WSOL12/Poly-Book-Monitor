@@ -75,7 +75,12 @@ export function EventOrderbook({
   const activeId = tokenId ?? internalId;
   const setActiveId = onTokenChange ?? setInternalId;
 
-  const resolvedId = tokens.some((t) => t.tokenId === activeId) ? activeId : (tokens[0]?.tokenId ?? "");
+  const resolvedId = tokens.some((t) => t.tokenId === activeId)
+    ? activeId
+    : (tokens.find((t) => t.marketType === "weather" && t.side === "yes")?.tokenId ??
+      tokens.find((t) => t.side === "yes")?.tokenId ??
+      tokens[0]?.tokenId ??
+      "");
   const active = tokens.find((t) => t.tokenId === resolvedId) ?? null;
   const moneyline = useMemo(() => tokens.filter((t) => t.marketType === "moneyline"), [tokens]);
   const weatherBuckets = useMemo(() => tokens.filter((t) => t.marketType === "weather"), [tokens]);
@@ -189,7 +194,7 @@ export function EventOrderbook({
                 ? (weatherBuckets.find((t) => bucketKey(t) === key && t.side === activeSide) ?? token)
                 : token;
             const q = frameQuotes?.get(displayTok.tokenId);
-            const ask = q?.bestAsk ?? displayTok.lastAsk;
+            const ask = q ? q.bestAsk : displayTok.lastAsk;
             const on =
               token.marketType === "weather"
                 ? Boolean(active && bucketKey(active) === key)
