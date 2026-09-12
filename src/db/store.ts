@@ -286,6 +286,29 @@ export class MonitorStore {
     ).map((row) => row.eventId);
   }
 
+  /**
+   * Sticky-arm weather we already recorded. The 60¢ gate must not unsubscribe
+   * a market mid-flight just because the favorite later dipped below 60¢, or
+   * because `armed` defaulted to 0 after a schema/code change.
+   */
+  armWeatherThatAlreadyHasBooks() {
+    const ids = this.db
+      .prepare(`SELECT event_id AS eventId FROM events WHERE sport = 'weather' AND armed = 0`)
+      .all() as Array<{ eventId: string }>;
+    if (!ids.length) return 0;
+    const hasBook = this.db.prepare(`SELECT 1 AS ok FROM book_snapshots WHERE event_id = ? LIMIT 1`);
+    let n = 0;
+    const tx = this.db.transaction(() => {
+      for (const { eventId } of ids) {
+        if (!hasBook.get(eventId)) continue;
+        this.armEvent(eventId);
+        n++;
+      }
+    });
+    tx();
+    return n;
+  }
+
   /** Mark events that left the live catalog as finished so UI/recording stop. */
   markEventsFinished(eventIds: string[], finishedAt = Date.now()) {
     if (!eventIds.length) return;

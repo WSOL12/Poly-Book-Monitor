@@ -36,6 +36,8 @@ function weatherReady(event: MonitoredEvent, armed: Set<string>) {
 export async function main() {
   const db = openDb();
   const store = new MonitorStore(db);
+  const recovered = store.armWeatherThatAlreadyHasBooks();
+  if (recovered) pushLog(`re-arm ${recovered} weather already on disk`);
   const startedAt = Date.now();
   let events: MonitoredEvent[] = [];
   let tokens: MonitoredToken[] = [];
@@ -94,7 +96,10 @@ export async function main() {
           active.push(event);
           continue;
         }
-        if (weatherReady(event, armed)) {
+        // Don't abandon a city we are already streaming this process, even if
+        // Gamma's yes-price print is stale/below the 60¢ gate.
+        const alreadyLive = prevIds.has(event.eventId);
+        if (alreadyLive || weatherReady(event, armed)) {
           if (!armed.has(event.eventId)) {
             store.armEvent(event.eventId);
             armed.add(event.eventId);
