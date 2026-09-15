@@ -68,6 +68,24 @@ export function parseScoreString(score: string | null | undefined): ParsedScore 
   };
 }
 
+/** Compact score for match lists, e.g. "1–1" or "6-4, 3-6, 7-5". */
+export function formatScoreLabel(score: string | null | undefined): string | null {
+  const parsed = parseScoreString(score);
+  if (!parsed) return score?.trim() || null;
+  if (parsed.mode === "sets") return score!.trim();
+  return `${parsed.homeTotal}–${parsed.awayTotal}`;
+}
+
+/** Sports score, or weather winning temp bucket. */
+export function eventResultLabel(event: {
+  sport: string;
+  score?: string | null;
+  winTemp?: string | null;
+}): string | null {
+  if (event.sport === "weather") return event.winTemp?.trim() || null;
+  return formatScoreLabel(event.score);
+}
+
 function sameTeamName(a: string | null | undefined, b: string | null | undefined) {
   if (!a || !b) return false;
   const na = a.toLowerCase().replace(/[^a-z0-9]/g, "");

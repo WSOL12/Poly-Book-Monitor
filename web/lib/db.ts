@@ -29,6 +29,10 @@ export type EventRow = {
   marketCount: number;
   tokenCount: number;
   lastSnapshotAt: number | null;
+  score: string | null;
+  period: string | null;
+  /** Winning weather temp bucket label, e.g. "94-95°F". */
+  winTemp: string | null;
 };
 
 export type MarketRow = {
@@ -109,12 +113,18 @@ function mapEventRow(row: {
   marketCount: number;
   tokenCount: number;
   lastSnapshotAt: number | null;
+  score?: string | null;
+  period?: string | null;
+  winTemp?: string | null;
 }): EventRow {
   return {
     ...row,
     ended: row.ended === 1,
     polyLive: row.polyLive === 1,
     closed: row.closed === 1,
+    score: row.score ?? null,
+    period: row.period ?? null,
+    winTemp: row.winTemp ?? null,
   };
 }
 
@@ -249,7 +259,24 @@ export function listEvents(sport?: Sport): EventRow[] {
            e.finished_at AS finishedAt,
            (SELECT COUNT(*) FROM markets m WHERE m.event_id = e.event_id) AS marketCount,
            (SELECT COUNT(*) FROM tokens t WHERE t.event_id = e.event_id) AS tokenCount,
-           (SELECT MAX(s.captured_at) FROM book_snapshots s WHERE s.event_id = e.event_id) AS lastSnapshotAt
+           (SELECT MAX(s.captured_at) FROM book_snapshots s WHERE s.event_id = e.event_id) AS lastSnapshotAt,
+           (SELECT sc.score FROM score_snapshots sc
+             WHERE sc.event_id = e.event_id ORDER BY sc.captured_at DESC LIMIT 1) AS score,
+           (SELECT sc.period FROM score_snapshots sc
+             WHERE sc.event_id = e.event_id ORDER BY sc.captured_at DESC LIMIT 1) AS period,
+           CASE WHEN e.sport = 'weather' THEN (
+             SELECT t.label FROM tokens t
+             WHERE t.event_id = e.event_id AND t.side = 'yes'
+             ORDER BY COALESCE((
+               SELECT s.best_bid FROM book_snapshots s
+               WHERE s.token_id = t.token_id ORDER BY s.captured_at DESC LIMIT 1
+             ), 0) DESC,
+             COALESCE((
+               SELECT s.best_ask FROM book_snapshots s
+               WHERE s.token_id = t.token_id ORDER BY s.captured_at DESC LIMIT 1
+             ), 0) DESC
+             LIMIT 1
+           ) ELSE NULL END AS winTemp
          FROM events e
          ${sport ? "WHERE e.sport = @sport" : ""}
          ORDER BY e.ended ASC, e.closed ASC, e.finished_at DESC, lastSnapshotAt DESC, COALESCE(e.event_date, '9999-12-31') DESC, e.title`

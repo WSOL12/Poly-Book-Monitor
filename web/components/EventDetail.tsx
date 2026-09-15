@@ -5,10 +5,12 @@ import { useCallback, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { EventOrderbook } from "@/components/EventOrderbook";
 import { quoteAtTime } from "@/lib/history";
+import { MatchRail } from "@/components/MatchRail";
 import { MatchScoreboard } from "@/components/MatchScoreboard";
 import { Topbar } from "@/components/Topbar";
 import { isEventLive } from "@/lib/live";
 import { ago, finishedWhen } from "@/lib/time";
+import type { Sport } from "@/lib/db";
 
 function cents(p: number | null | undefined) {
   if (p == null || !Number.isFinite(p)) return "—";
@@ -20,6 +22,10 @@ type QuotePoint = { capturedAt: number; bestBid: number | null; bestAsk: number 
 export default function EventDetail({ eventId }: { eventId: string }) {
   const [frameAt, setFrameAt] = useState<number | undefined>();
   const [tokenId, setTokenId] = useState("");
+  const [activeBook, setActiveBook] = useState<{
+    bestBid: number | null;
+    bestAsk: number | null;
+  } | null>(null);
 
   const event = useQuery({
     queryKey: ["event", eventId],
@@ -63,8 +69,19 @@ export default function EventDetail({ eventId }: { eventId: string }) {
     refetchInterval: () => (event.data && isEventLive(event.data) ? 10_000 : false),
   });
 
-  const onFrame = useCallback((capturedAt: number) => {
-    setFrameAt(capturedAt);
+  const onFrame = useCallback((capturedAt: number, book?: { bestBid: number | null; bestAsk: number | null }) => {
+    setFrameAt((prev) => (prev === capturedAt ? prev : capturedAt));
+    setActiveBook((prev) => {
+      const next = book ?? null;
+      if (
+        prev?.bestBid === next?.bestBid &&
+        prev?.bestAsk === next?.bestAsk &&
+        (prev == null) === (next == null)
+      ) {
+        return prev;
+      }
+      return next;
+    });
   }, []);
 
   const quoteById = useMemo(() => {
@@ -128,15 +145,17 @@ export default function EventDetail({ eventId }: { eventId: string }) {
       ) : (
         <>
           <nav className="crumbs">
-            <Link href="/">Matches</Link>
-            <span className="crumb-sep">/</span>
-            <span className="crumb-current">{data.title}</span>
-            <span className="crumb-meta">
-              <span className={`sport-chip sport-${data.sport}`}>{data.sport}</span>
-              <span className={live ? "match-status is-live" : "match-status"}>
-                {live ? "Live" : "Finished"}
+            <div className="crumbs-left">
+              <Link href="/">Matches</Link>
+              <span className="crumb-sep">/</span>
+              <span className="crumb-current">{data.title}</span>
+              <span className="crumb-meta">
+                <span className={`sport-chip sport-${data.sport}`}>{data.sport}</span>
+                <span className={live ? "match-status is-live" : "match-status"}>
+                  {live ? "Live" : "Finished"}
+                </span>
               </span>
-            </span>
+            </div>
             <a
               className="btn btn-primary crumb-poly"
               href={`https://polymarket.com/event/${data.slug}`}
@@ -148,6 +167,8 @@ export default function EventDetail({ eventId }: { eventId: string }) {
           </nav>
 
           <div className="event-page">
+            <MatchRail activeEventId={eventId} sport={data.sport as Sport} />
+
             <div className="event-main">
               {data.sport !== "weather" ? (
                 <MatchScoreboard
@@ -168,8 +189,13 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                 matchEnd={data.finishedAt}
                 onFrame={onFrame}
                 tokenId={tokenId || defaultTokenId}
-                onTokenChange={setTokenId}
+                onTokenChange={(id) => {
+                  setTokenId(id);
+                  setActiveBook(null);
+                }}
                 frameQuotes={quoteById}
+                seekAt={frameAt}
+                activeBook={activeBook}
               />
 
               <div className="event-meta mono">
@@ -182,7 +208,17 @@ export default function EventDetail({ eventId }: { eventId: string }) {
             </div>
 
             <aside className="event-aside">
-              <h2 className="aside-title">Markets</h2>
+              <div className="aside-head">
+                <h2 className="aside-title">Markets</h2>
+                <a
+                  className="btn btn-primary aside-poly"
+                  href={`https://polymarket.com/event/${data.slug}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Polymarket ↗
+                </a>
+              </div>
               {data.markets.map(
                 (market: {
                   marketId: string;
@@ -214,9 +250,11 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                         })
                         .map((token) => {
                         const q = quoteById.get(token.tokenId);
-                        // Once quote series is loaded for this token, use it (even if a side is null).
-                        const bid = q ? q.bestBid : token.lastBid;
-                        const ask = q ? q.bestAsk : token.lastAsk;
+                        const fromBook =
+                          token.tokenId === (tokenId || defaultTokenId) && activeBook
+                            ? activeBook
+                            : null;
+                        const ask = fromBook ? fromBook.bestAsk : q ? q.bestAsk : token.lastAsk;
                         const name =
                           market.marketType === "weather"
                             ? token.side === "no"
@@ -231,11 +269,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                             onClick={() => setTokenId(token.tokenId)}
                           >
                             <span>{name}</span>
-                            <span className="aside-quotes mono">
-                              <span className="green">{cents(bid)}</span>
-                              <span className="quote-sep">/</span>
-                              <span className="red">{cents(ask)}</span>
-                            </span>
+                            <span className="aside-ask mono">{cents(ask)}</span>
                           </button>
                         );
                       })}

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { EventRow } from "@/lib/db";
 import { splitEvents } from "@/lib/live";
+import { eventResultLabel } from "@/lib/score";
 import { ago, finishedWhen } from "@/lib/time";
 
 type Tab = "live" | "finished";
@@ -16,20 +17,31 @@ const SPORT_LABEL: Record<string, string> = {
 };
 
 function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
+  const result = eventResultLabel(event);
   return (
     <Link href={`/event/${event.eventId}`} className={`match-row${tab === "live" ? " match-row-live" : ""}`}>
       <div className="match-main">
         <div className="match-title">{event.title}</div>
         <div className="match-meta">
           <span className={`sport-chip sport-${event.sport}`}>{SPORT_LABEL[event.sport] ?? event.sport}</span>
+          {event.period && event.sport !== "weather" ? (
+            <span className="match-period">{event.period}</span>
+          ) : null}
           {event.eventDate ? <span className="match-date">{event.eventDate}</span> : null}
           <span className="match-markets">
             {event.marketCount} mkts · {event.tokenCount} tokens
           </span>
         </div>
       </div>
+      {result ? (
+        <div className="match-result mono" title={event.sport === "weather" ? "Winning temp" : "Score"}>
+          {result}
+        </div>
+      ) : (
+        <div className="match-result match-result-empty mono">—</div>
+      )}
       <div className="match-side">
-          <span className={`match-status${tab === "live" ? " is-live" : ""}`}>
+        <span className={`match-status${tab === "live" ? " is-live" : ""}`}>
           {tab === "live" ? (event.sport === "weather" ? "Open" : "Live") : "Finished"}
         </span>
         <span className="match-time mono">

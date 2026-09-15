@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { OrderbookChart } from "@/components/OrderbookChart";
 import { OrderbookScrubber } from "@/components/OrderbookScrubber";
 import type { FrameQuote } from "@/lib/history";
@@ -39,7 +39,7 @@ function bucketKey(token: TokenOption) {
   return token.line ?? token.label;
 }
 
-import { expandTimeline } from "@/lib/timeline";
+import { cropScrubWindow, expandTimeline } from "@/lib/timeline";
 
 async function fetchHistory(tokenId: string) {
   const res = await fetch(`/api/tokens/${tokenId}/history`);
@@ -60,15 +60,21 @@ export function EventOrderbook({
   tokenId,
   onTokenChange,
   frameQuotes,
+  seekAt,
+  activeBook,
 }: {
   tokens: TokenOption[];
   eventFinished?: boolean;
   matchStart?: string | null;
   matchEnd?: number | null;
-  onFrame?: (capturedAt: number) => void;
+  onFrame?: (capturedAt: number, book?: { bestBid: number | null; bestAsk: number | null }) => void;
   tokenId?: string;
   onTokenChange?: (tokenId: string) => void;
   frameQuotes?: Map<string, { bestBid: number | null; bestAsk: number | null }>;
+  /** Shared scrub time across moneyline / draw / O-U on the same match. */
+  seekAt?: number;
+  /** Live top-of-book for the selected token — must match the ladder below. */
+  activeBook?: { bestBid: number | null; bestAsk: number | null } | null;
 }) {
   const [internalId, setInternalId] = useState(tokens[0]?.tokenId ?? "");
   const [tab, setTab] = useState<"book" | "graph">("book");
@@ -117,11 +123,13 @@ export function EventOrderbook({
     enabled: Boolean(resolvedId),
     refetchInterval: eventFinished ? false : 5_000,
     staleTime: eventFinished ? Infinity : 4_000,
+    // Keep the scrubber mounted while another market's history loads.
+    placeholderData: keepPreviousData,
   });
 
   const handleFrame = useCallback(
-    (snap: { capturedAt: number }) => {
-      onFrame?.(snap.capturedAt);
+    (snap: { capturedAt: number; bestBid?: number | null; bestAsk?: number | null }) => {
+      onFrame?.(snap.capturedAt, { bestBid: snap.bestBid ?? null, bestAsk: snap.bestAsk ?? null });
     },
     [onFrame]
   );
@@ -144,7 +152,11 @@ export function EventOrderbook({
   }
 
   const data = history.data;
-  const frames = data?.totalSnapshots ?? data?.snapshots?.length ?? 0;
+  const scrubFrames = useMemo(
+    () => cropScrubWindow(data?.snapshots ?? [], matchStart, matchEnd),
+    [data?.snapshots, matchStart, matchEnd]
+  );
+  const frames = scrubFrames.length || data?.totalSnapshots || 0;
   const marketTitle =
     active?.marketType === "moneyline"
       ? "Moneyline"
@@ -194,7 +206,11 @@ export function EventOrderbook({
                 ? (weatherBuckets.find((t) => bucketKey(t) === key && t.side === activeSide) ?? token)
                 : token;
             const q = frameQuotes?.get(displayTok.tokenId);
-            const ask = q ? q.bestAsk : displayTok.lastAsk;
+            const fromBook =
+              displayTok.tokenId === resolvedId && activeBook
+                ? activeBook
+                : null;
+            const ask = fromBook ? fromBook.bestAsk : q ? q.bestAsk : displayTok.lastAsk;
             const on =
               token.marketType === "weather"
                 ? Boolean(active && bucketKey(active) === key)
@@ -235,7 +251,7 @@ export function EventOrderbook({
         </button>
       </div>
 
-      {history.isLoading ? (
+      {history.isLoading && !data ? (
         <div className="panel-loading">Loading orderbook…</div>
       ) : tab === "graph" ? (
         <OrderbookChart snapshots={data?.snapshots ?? []} matchEnd={matchEnd} />
@@ -246,7 +262,8 @@ export function EventOrderbook({
           startAtBeginning={eventFinished || Boolean(data?.eventFinished)}
           matchStart={matchStart}
           matchEnd={matchEnd}
-          onFrame={(snap) => handleFrame(snap)}
+          seekAt={seekAt}
+          onFrame={handleFrame}
         />
       )}
     </section>
