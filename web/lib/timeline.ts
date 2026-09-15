@@ -86,7 +86,10 @@ export function matchScrubWindow(
   const sampleHi = sample && sample.length ? sample[sample.length - 1]!.capturedAt : undefined;
 
   if (Number.isFinite(kickoff) && Number.isFinite(finish) && finish > kickoff) {
-    return { t0: kickoff - 5 * 60_000, t1: finish + 5 * 60_000 };
+    let t1 = finish + 5 * 60_000;
+    // Don't extend past recorded book data when available.
+    if (sampleHi != null) t1 = Math.min(t1, sampleHi);
+    return { t0: kickoff - 5 * 60_000, t1: Math.max(t1, kickoff + 60_000) };
   }
 
   if (Number.isFinite(kickoff) && sampleHi != null && sampleHi > kickoff) {
@@ -117,4 +120,57 @@ export function matchScrubWindow(
   }
 
   return null;
+}
+
+function sportMatchBounds(sport?: string | null) {
+  // typical = expected length; max = hard scrub cap (late VFT polls must not stretch to 5h)
+  if (sport === "football" || sport === "mlb") {
+    return { typicalMs: 3.5 * 60 * 60_000, maxMs: 5 * 60 * 60_000 };
+  }
+  // Soccer: 90 + HT + stoppage; allow ET/extra without opening a multi-hour SUS gap
+  return { typicalMs: 105 * 60_000, maxMs: 150 * 60_000 };
+}
+
+/**
+ * True match end for the scrubber.
+ * - `finished_at` is sometimes stamped early (mid-game SUS)
+ * - `lastScoreAt` can be hours late (next poll after VFT), so only trust it
+ *   inside a plausible post-kickoff window — never stretch the bar to ~5h
+ */
+export function resolveMatchEnd(opts: {
+  sport?: string | null;
+  matchStart?: string | null;
+  finishedAt?: number | null;
+  lastScoreAt?: number | null;
+}): number | null {
+  const kickoff = opts.matchStart ? Date.parse(opts.matchStart) : NaN;
+  const finish =
+    opts.finishedAt != null && Number.isFinite(opts.finishedAt) ? Number(opts.finishedAt) : NaN;
+  const lastScore =
+    opts.lastScoreAt != null && Number.isFinite(opts.lastScoreAt) ? Number(opts.lastScoreAt) : NaN;
+
+  let end = Number.isFinite(finish) ? finish : NaN;
+
+  if (Number.isFinite(kickoff) && opts.sport !== "weather") {
+    const { typicalMs, maxMs } = sportMatchBounds(opts.sport);
+    const scoreUsable =
+      Number.isFinite(lastScore) &&
+      lastScore >= kickoff - 5 * 60_000 &&
+      lastScore - kickoff <= maxMs;
+
+    if (scoreUsable) {
+      end = Number.isFinite(end) ? Math.max(end, lastScore) : lastScore;
+    }
+
+    if (!Number.isFinite(end) || end - kickoff < typicalMs * 0.55) {
+      end = Math.max(Number.isFinite(end) ? end : 0, kickoff + typicalMs);
+      if (scoreUsable) end = Math.max(end, lastScore);
+    }
+
+    end = Math.min(end, kickoff + maxMs);
+  } else if (Number.isFinite(lastScore)) {
+    end = Number.isFinite(end) ? Math.max(end, lastScore) : lastScore;
+  }
+
+  return Number.isFinite(end) && end > 0 ? end : null;
 }

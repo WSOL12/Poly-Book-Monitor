@@ -107,6 +107,11 @@ export function initSchema(db: Database.Database) {
   if (!names.has("game_status")) db.exec(`ALTER TABLE events ADD COLUMN game_status TEXT`);
   if (!names.has("finished_at")) db.exec(`ALTER TABLE events ADD COLUMN finished_at INTEGER`);
   if (!names.has("armed")) db.exec(`ALTER TABLE events ADD COLUMN armed INTEGER NOT NULL DEFAULT 0`);
+  if (!names.has("league")) db.exec(`ALTER TABLE events ADD COLUMN league TEXT`);
+  if (!names.has("volume")) db.exec(`ALTER TABLE events ADD COLUMN volume REAL`);
+  const marketCols = db.prepare(`PRAGMA table_info(markets)`).all() as Array<{ name: string }>;
+  const marketNames = new Set(marketCols.map((c) => c.name));
+  if (!marketNames.has("volume")) db.exec(`ALTER TABLE markets ADD COLUMN volume REAL`);
 }
 
 export type PolyEventStatus = {

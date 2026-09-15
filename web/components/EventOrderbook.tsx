@@ -16,6 +16,8 @@ type TokenOption = {
   side?: string;
   lastBid?: number | null;
   lastAsk?: number | null;
+  /** Polymarket volume for this market (USD). */
+  volume?: number | null;
 };
 
 function cents(p: number | null | undefined) {
@@ -40,6 +42,7 @@ function bucketKey(token: TokenOption) {
 }
 
 import { cropScrubWindow, expandTimeline } from "@/lib/timeline";
+import { formatVolume } from "@/lib/league";
 
 async function fetchHistory(tokenId: string) {
   const res = await fetch(`/api/tokens/${tokenId}/history`);
@@ -62,6 +65,7 @@ export function EventOrderbook({
   frameQuotes,
   seekAt,
   activeBook,
+  eventVolume,
 }: {
   tokens: TokenOption[];
   eventFinished?: boolean;
@@ -75,6 +79,8 @@ export function EventOrderbook({
   seekAt?: number;
   /** Live top-of-book for the selected token — must match the ladder below. */
   activeBook?: { bestBid: number | null; bestAsk: number | null } | null;
+  /** Event-level Polymarket volume fallback when market volume is missing. */
+  eventVolume?: number | null;
 }) {
   const [internalId, setInternalId] = useState(tokens[0]?.tokenId ?? "");
   const [tab, setTab] = useState<"book" | "graph">("book");
@@ -157,6 +163,12 @@ export function EventOrderbook({
     [data?.snapshots, matchStart, matchEnd]
   );
   const frames = scrubFrames.length || data?.totalSnapshots || 0;
+  const marketVolume =
+    active?.volume != null && active.volume > 0
+      ? active.volume
+      : active?.marketType === "moneyline" && eventVolume != null && eventVolume > 0
+        ? eventVolume
+        : null;
   const marketTitle =
     active?.marketType === "moneyline"
       ? "Moneyline"
@@ -176,7 +188,17 @@ export function EventOrderbook({
       <div className="poly-market-head">
         <div className="poly-market-title">
           <h2>{marketTitle}</h2>
-          <span className="poly-market-vol mono">{frames.toLocaleString()} frames</span>
+          <span className="poly-market-vol mono">
+            {marketVolume != null ? (
+              <>
+                <span className="poly-market-usd" title="Polymarket volume">
+                  {formatVolume(marketVolume)}
+                </span>
+                <span className="poly-market-sep">·</span>
+              </>
+            ) : null}
+            {frames.toLocaleString()} frames
+          </span>
           {weatherPair?.no ? (
             <div className="poly-yn-toggle" role="group" aria-label="Yes or No">
               <button
@@ -259,7 +281,7 @@ export function EventOrderbook({
         <OrderbookScrubber
           snapshots={data?.snapshots ?? []}
           outcomeLabel={scrubberLabel}
-          startAtBeginning={eventFinished || Boolean(data?.eventFinished)}
+          startAtBeginning={false}
           matchStart={matchStart}
           matchEnd={matchEnd}
           seekAt={seekAt}

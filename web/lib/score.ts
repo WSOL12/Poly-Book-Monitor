@@ -160,5 +160,6 @@ export function scoreAtTime<T extends { capturedAt: number; score: string | null
     if (row.capturedAt <= atMs) best = row;
     else break;
   }
-  return best ?? rows[0] ?? null;
+  // Don't invent the first score before it existed — caller can fall back to final.
+  return best;
 }

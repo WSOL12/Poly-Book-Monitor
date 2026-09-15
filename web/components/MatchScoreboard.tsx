@@ -73,19 +73,19 @@ export function MatchScoreboard({
   scoreHistory?: Array<{ capturedAt: number; score: string | null; period: string | null; elapsed: string | null }>;
 }) {
   const frame = atMs != null ? scoreAtTime(scoreHistory, atMs) : null;
-  // Finished games: if scrubber hasn't reported yet, prefer last recorded score / Gamma final.
   const latestHistory = scoreHistory.length ? scoreHistory[scoreHistory.length - 1] : null;
-  const scoreStr =
-    frame?.score ??
-    (ended || closed ? latestHistory?.score : null) ??
-    sports?.score ??
-    null;
-  const period =
-    frame?.period ??
-    ((ended || closed) && !frame ? latestHistory?.period : null) ??
-    sports?.period ??
-    null;
-  const elapsed = frame?.elapsed ?? sports?.elapsed ?? null;
+  const preferFinal = ended || closed;
+  // Finished: headline score matches the list (latest VFT/FT), not a mid-match scrub/SUS snap.
+  // Live: follow the scrubber. ScoreTimeline below still shows the full progression.
+  const scoreStr = preferFinal
+    ? (latestHistory?.score ?? sports?.score ?? frame?.score ?? null)
+    : (frame?.score ?? sports?.score ?? null);
+  const period = preferFinal
+    ? (latestHistory?.period ?? sports?.period ?? frame?.period ?? null)
+    : (frame?.period ?? sports?.period ?? null);
+  const elapsed = preferFinal
+    ? (latestHistory?.elapsed ?? sports?.elapsed ?? frame?.elapsed ?? null)
+    : (frame?.elapsed ?? sports?.elapsed ?? null);
 
   const parsed = useMemo(() => parseScoreString(scoreStr), [scoreStr]);
   const { home, away } = useMemo(() => teamRows(sports?.teams, title), [sports?.teams, title]);

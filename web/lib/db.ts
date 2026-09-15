@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
-import { fetchEventsByIds, finishedAtFromGamma, isFinishedGammaEvent } from "./gamma";
+import { fetchEventsByIds, finishedAtFromGamma, isFinishedGammaEvent, type GammaMarketStatus } from "./gamma";
+import { leagueFromGamma } from "./league";
 import { DB_PATH } from "./paths";
 
 export type Sport = "soccer" | "football" | "mlb" | "weather";
@@ -33,6 +34,10 @@ export type EventRow = {
   period: string | null;
   /** Winning weather temp bucket label, e.g. "94-95°F". */
   winTemp: string | null;
+  /** League / competition label (UCL, Eredivisie, …). */
+  league: string | null;
+  /** Polymarket event total volume (USD). */
+  volume: number | null;
 };
 
 export type MarketRow = {
@@ -40,6 +45,8 @@ export type MarketRow = {
   marketType: "moneyline" | "total" | "weather";
   question: string;
   line: string | null;
+  /** Polymarket market volume (USD), when known. */
+  volume: number | null;
   tokens: TokenRow[];
 };
 
@@ -82,6 +89,11 @@ function ensureDbSchema() {
     if (!names.has("closed")) db.exec(`ALTER TABLE events ADD COLUMN closed INTEGER NOT NULL DEFAULT 0`);
     if (!names.has("game_status")) db.exec(`ALTER TABLE events ADD COLUMN game_status TEXT`);
     if (!names.has("finished_at")) db.exec(`ALTER TABLE events ADD COLUMN finished_at INTEGER`);
+    if (!names.has("league")) db.exec(`ALTER TABLE events ADD COLUMN league TEXT`);
+    if (!names.has("volume")) db.exec(`ALTER TABLE events ADD COLUMN volume REAL`);
+    const marketCols = db.prepare(`PRAGMA table_info(markets)`).all() as Array<{ name: string }>;
+    const marketNames = new Set(marketCols.map((c) => c.name));
+    if (!marketNames.has("volume")) db.exec(`ALTER TABLE markets ADD COLUMN volume REAL`);
     db.exec(`
       CREATE TABLE IF NOT EXISTS score_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,6 +108,36 @@ function ensureDbSchema() {
   } finally {
     db.close();
   }
+}
+
+function parseGammaVolume(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && raw.trim()) {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function marketVolumesFromGamma(eventId: string, markets: GammaMarketStatus[] | undefined) {
+  const out = new Map<string, number>();
+  let moneyline = 0;
+  for (const market of markets ?? []) {
+    const vol = parseGammaVolume(market.volumeNum ?? market.volume) ?? 0;
+    if (vol <= 0) continue;
+    const type = market.sportsMarketType?.trim().toLowerCase() ?? "";
+    if (type === "moneyline" || type === "child_moneyline") {
+      moneyline += vol;
+      continue;
+    }
+    const slug = market.slug?.trim();
+    if (slug) {
+      const key = `${eventId}:${slug}`;
+      out.set(key, (out.get(key) ?? 0) + vol);
+    }
+  }
+  if (moneyline > 0) out.set(`${eventId}:moneyline`, moneyline);
+  return out;
 }
 
 function mapEventRow(row: {
@@ -116,6 +158,8 @@ function mapEventRow(row: {
   score?: string | null;
   period?: string | null;
   winTemp?: string | null;
+  league?: string | null;
+  volume?: number | null;
 }): EventRow {
   return {
     ...row,
@@ -125,6 +169,8 @@ function mapEventRow(row: {
     score: row.score ?? null,
     period: row.period ?? null,
     winTemp: row.winTemp ?? null,
+    league: row.league ?? null,
+    volume: row.volume != null && Number.isFinite(Number(row.volume)) ? Number(row.volume) : null,
   };
 }
 
@@ -148,8 +194,13 @@ export async function refreshPolyStatuses() {
             WHEN @ended = 1 OR @closed = 1 THEN COALESCE(@finishedAt, finished_at)
             ELSE finished_at
           END,
+          league = COALESCE(@league, league),
+          volume = COALESCE(@volume, volume),
           updated_at = @updatedAt
       WHERE event_id = @eventId
+    `);
+    const updateMarketVolume = db.prepare(`
+      UPDATE markets SET volume = @volume WHERE market_id = @marketId
     `);
     const lastScore = db.prepare(`
       SELECT score, period, elapsed FROM score_snapshots
@@ -177,8 +228,18 @@ export async function refreshPolyStatuses() {
           closed: row.closed === true ? 1 : 0,
           gameStatus: row.gameStatus?.trim() || row.period?.trim() || null,
           finishedAt: finished ? finishedAtFromGamma(row) : null,
+          league: leagueFromGamma({
+            series: row.series,
+            seriesSlug: row.seriesSlug,
+            tags: row.tags,
+            slug: row.slug,
+          }),
+          volume: parseGammaVolume(row.volume),
           updatedAt: now,
         });
+        for (const [marketId, volume] of marketVolumesFromGamma(id, row.markets)) {
+          updateMarketVolume.run({ marketId, volume });
+        }
         const score = row.score?.trim() || null;
         const period = row.period?.trim() || null;
         const elapsed = row.elapsed?.trim() || null;
@@ -257,6 +318,8 @@ export function listEvents(sport?: Sport): EventRow[] {
            e.closed,
            e.game_status AS gameStatus,
            e.finished_at AS finishedAt,
+           e.league,
+           e.volume,
            (SELECT COUNT(*) FROM markets m WHERE m.event_id = e.event_id) AS marketCount,
            (SELECT COUNT(*) FROM tokens t WHERE t.event_id = e.event_id) AS tokenCount,
            (SELECT MAX(s.captured_at) FROM book_snapshots s WHERE s.event_id = e.event_id) AS lastSnapshotAt,
@@ -295,7 +358,8 @@ export function getEvent(eventId: string) {
     const event = db
       .prepare(
         `SELECT event_id AS eventId, sport, title, slug, start_time AS startTime, event_date AS eventDate,
-                ended, poly_live AS polyLive, closed, game_status AS gameStatus, finished_at AS finishedAt
+                ended, poly_live AS polyLive, closed, game_status AS gameStatus, finished_at AS finishedAt,
+                league, volume
          FROM events WHERE event_id = ?`
       )
       .get(eventId) as Parameters<typeof mapEventRow>[0] | undefined;
@@ -303,7 +367,7 @@ export function getEvent(eventId: string) {
 
     const markets = db
       .prepare(
-        `SELECT market_id AS marketId, market_type AS marketType, question, line
+        `SELECT market_id AS marketId, market_type AS marketType, question, line, volume
          FROM markets WHERE event_id = ?
          ORDER BY CASE market_type WHEN 'moneyline' THEN 0 ELSE 1 END, COALESCE(line, '0')`
       )
@@ -335,6 +399,8 @@ export function getEvent(eventId: string) {
 
     const marketRows: MarketRow[] = markets.map((market) => ({
       ...market,
+      volume:
+        market.volume != null && Number.isFinite(Number(market.volume)) ? Number(market.volume) : null,
       tokens: tokens
         .filter((token) => token.marketId === market.marketId)
         .map(({ tokenId, side, label, line, lastBid, lastAsk, lastAt }) => ({

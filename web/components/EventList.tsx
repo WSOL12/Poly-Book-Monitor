@@ -2,8 +2,17 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { MatchListControls } from "@/components/MatchListControls";
 import type { EventRow } from "@/lib/db";
+import { formatVolume, leagueAccent, resolveLeague } from "@/lib/league";
 import { splitEvents } from "@/lib/live";
+import {
+  DEFAULT_MATCH_FILTERS,
+  filterAndSortEvents,
+  groupSortedEvents,
+  listLeagueOptions,
+  type MatchListFilters,
+} from "@/lib/matchFilters";
 import { eventResultLabel } from "@/lib/score";
 import { ago, finishedWhen } from "@/lib/time";
 
@@ -18,19 +27,22 @@ const SPORT_LABEL: Record<string, string> = {
 
 function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
   const result = eventResultLabel(event);
+  const { code, label: league } = resolveLeague(event);
+  const accent = leagueAccent(code);
   return (
     <Link href={`/${event.sport}/event/${event.eventId}`} className={`match-row${tab === "live" ? " match-row-live" : ""}`}>
       <div className="match-main">
         <div className="match-title">{event.title}</div>
         <div className="match-meta">
           <span className={`sport-chip sport-${event.sport}`}>{SPORT_LABEL[event.sport] ?? event.sport}</span>
+          <span className="match-league" style={{ color: accent }}>
+            {league}
+          </span>
           {event.period && event.sport !== "weather" ? (
             <span className="match-period">{event.period}</span>
           ) : null}
           {event.eventDate ? <span className="match-date">{event.eventDate}</span> : null}
-          <span className="match-markets">
-            {event.marketCount} mkts · {event.tokenCount} tokens
-          </span>
+          <span className="match-markets mono">{formatVolume(event.volume)}</span>
         </div>
       </div>
       {result ? (
@@ -58,15 +70,26 @@ function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
 export function EventList({ events, loading }: { events: EventRow[]; loading?: boolean }) {
   const [tab, setTab] = useState<Tab>("live");
   const [search, setSearch] = useState("");
+  const [filters, setFilters] = useState<MatchListFilters>(DEFAULT_MATCH_FILTERS);
 
   const { live, finished } = useMemo(() => splitEvents(events), [events]);
+  const pool = tab === "live" ? live : finished;
 
-  const filtered = useMemo(() => {
-    const pool = tab === "live" ? live : finished;
+  const searched = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return pool;
-    return pool.filter((e) => e.title.toLowerCase().includes(q) || e.sport.includes(q));
-  }, [tab, live, finished, search]);
+    return pool.filter(
+      (e) =>
+        e.title.toLowerCase().includes(q) ||
+        e.sport.includes(q) ||
+        resolveLeague(e).label.toLowerCase().includes(q) ||
+        (e.league?.toLowerCase().includes(q) ?? false)
+    );
+  }, [pool, search]);
+
+  const leagueOptions = useMemo(() => listLeagueOptions(searched), [searched]);
+  const filtered = useMemo(() => filterAndSortEvents(searched, filters), [searched, filters]);
+  const groups = useMemo(() => groupSortedEvents(filtered, filters.sort), [filtered, filters.sort]);
 
   if (loading) {
     return (
@@ -125,18 +148,22 @@ export function EventList({ events, loading }: { events: EventRow[]; loading?: b
           <input
             className="search-input"
             type="search"
-            placeholder="Search matches…"
+            placeholder="Search matches or leagues…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </label>
       </div>
 
+      <MatchListControls filters={filters} onChange={setFilters} leagueOptions={leagueOptions} />
+
       {filtered.length === 0 ? (
         <div className="panel-empty panel-empty-inline">
           <div className="panel-empty-title">
             No {tab === "live" ? "Live" : "Finished"} matches
-            {search.trim() ? " for this search" : ""}
+            {search.trim() || filters.group || filters.volumeMin || filters.date !== "all"
+              ? " for these filters"
+              : ""}
           </div>
           {search.trim() ? (
             <button type="button" className="btn-text" onClick={() => setSearch("")}>
@@ -150,9 +177,27 @@ export function EventList({ events, loading }: { events: EventRow[]; loading?: b
         </div>
       ) : (
         <div className="match-list">
-          {filtered.map((event) => (
-            <MatchRow key={event.eventId} event={event} tab={tab} />
-          ))}
+          {groups.map((group) => {
+            const accent = leagueAccent(group.code);
+            return (
+              <div
+                key={group.code}
+                className="match-group"
+                style={{ ["--league-accent" as string]: accent }}
+              >
+                <div className="match-group-head">
+                  <span className="match-group-name">{group.label}</span>
+                  <span className="match-group-meta mono">
+                    {group.events.length} match{group.events.length === 1 ? "" : "es"}
+                    {group.totalVolume > 0 ? ` · ${formatVolume(group.totalVolume)}` : ""}
+                  </span>
+                </div>
+                {group.events.map((event) => (
+                  <MatchRow key={event.eventId} event={event} tab={tab} />
+                ))}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

@@ -26,6 +26,12 @@ export type GammaSportsEvent = {
 };
 
 export type GammaMarketStatus = {
+  id?: string;
+  slug?: string;
+  question?: string;
+  sportsMarketType?: string | null;
+  volume?: string | number | null;
+  volumeNum?: number | null;
   closed?: boolean;
   closedTime?: string;
   umaEndDate?: string;
@@ -33,6 +39,7 @@ export type GammaMarketStatus = {
 
 export type GammaEventStatus = {
   id: string;
+  slug?: string;
   ended?: boolean;
   live?: boolean;
   closed?: boolean;
@@ -43,6 +50,10 @@ export type GammaEventStatus = {
   score?: string | null;
   period?: string | null;
   elapsed?: string | null;
+  volume?: number | null;
+  seriesSlug?: string | null;
+  series?: Array<{ title?: string | null; slug?: string | null }> | null;
+  tags?: Array<{ label?: string | null; slug?: string | null }> | null;
   markets?: GammaMarketStatus[];
 };
 

@@ -11,6 +11,8 @@ import { Topbar } from "@/components/Topbar";
 import { isEventLive } from "@/lib/live";
 import { ago, finishedWhen } from "@/lib/time";
 import type { Sport } from "@/lib/db";
+import { formatVolume } from "@/lib/league";
+import { resolveMatchEnd } from "@/lib/timeline";
 
 function cents(p: number | null | undefined) {
   if (p == null || !Number.isFinite(p)) return "—";
@@ -107,6 +109,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
         (market: {
           marketType: string;
           line: string | null;
+          volume?: number | null;
           tokens: Array<{
             tokenId: string;
             side: string;
@@ -123,18 +126,30 @@ export default function EventDetail({ eventId }: { eventId: string }) {
             line: market.line,
             lastBid: token.lastBid,
             lastAsk: token.lastAsk,
+            volume: market.volume ?? null,
           }))
       ) ?? [],
     [data]
   );
 
   const defaultTokenId =
-    allTokens.find((t) => t.marketType === "weather" && t.side === "yes")?.tokenId ??
-    allTokens.find((t) => t.side === "yes" || t.side === "over" || t.side === "home")?.tokenId ??
+    allTokens.find((t: { marketType: string; side?: string }) => t.marketType === "weather" && t.side === "yes")
+      ?.tokenId ??
+    allTokens.find((t: { side?: string }) => t.side === "yes" || t.side === "over" || t.side === "home")?.tokenId ??
     allTokens[0]?.tokenId;
 
   const live = data ? isEventLive(data) : false;
   const sportsData = sports.data?.sports;
+  const scoreRows = scores.data?.scores ?? [];
+  const lastScoreAt = scoreRows.length ? scoreRows[scoreRows.length - 1]!.capturedAt : null;
+  const matchEnd = data
+    ? resolveMatchEnd({
+        sport: data.sport,
+        matchStart: data.startTime,
+        finishedAt: data.finishedAt,
+        lastScoreAt,
+      })
+    : null;
 
   return (
     <div className="shell shell-event">
@@ -178,7 +193,8 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                 tokens={allTokens}
                 eventFinished={!live}
                 matchStart={data.startTime}
-                matchEnd={data.finishedAt}
+                matchEnd={matchEnd}
+                eventVolume={data.volume}
                 onFrame={onFrame}
                 tokenId={tokenId || defaultTokenId}
                 onTokenChange={(id) => {
@@ -201,7 +217,14 @@ export default function EventDetail({ eventId }: { eventId: string }) {
 
             <aside className="event-aside">
               <div className="aside-head">
-                <h2 className="aside-title">Markets</h2>
+                <div className="aside-title-wrap">
+                  <h2 className="aside-title">Markets</h2>
+                  {data.volume != null && data.volume > 0 ? (
+                    <span className="aside-vol mono" title="Event total volume">
+                      {formatVolume(data.volume)}
+                    </span>
+                  ) : null}
+                </div>
                 <a
                   className="btn btn-primary aside-poly"
                   href={`https://polymarket.com/event/${data.slug}`}
@@ -217,6 +240,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                   marketType: string;
                   question: string;
                   line: string | null;
+                  volume?: number | null;
                   tokens: Array<{
                     tokenId: string;
                     side: string;
@@ -227,11 +251,16 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                 }) => (
                   <div key={market.marketId} className="aside-market">
                     <div className="aside-market-head">
-                      {market.marketType === "moneyline"
-                        ? "Moneyline"
-                        : market.marketType === "weather"
-                          ? (market.line ?? "Temp")
-                          : `O/U ${market.line ?? ""}`}
+                      <span>
+                        {market.marketType === "moneyline"
+                          ? "Moneyline"
+                          : market.marketType === "weather"
+                            ? (market.line ?? "Temp")
+                            : `O/U ${market.line ?? ""}`}
+                      </span>
+                      {market.volume != null && market.volume > 0 ? (
+                        <span className="aside-market-vol mono">{formatVolume(market.volume)}</span>
+                      ) : null}
                     </div>
                     <div className="aside-outcomes">
                       {[...market.tokens]
