@@ -19,7 +19,7 @@ const SPORT_LABEL: Record<string, string> = {
 function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
   const result = eventResultLabel(event);
   return (
-    <Link href={`/event/${event.eventId}`} className={`match-row${tab === "live" ? " match-row-live" : ""}`}>
+    <Link href={`/${event.sport}/event/${event.eventId}`} className={`match-row${tab === "live" ? " match-row-live" : ""}`}>
       <div className="match-main">
         <div className="match-title">{event.title}</div>
         <div className="match-meta">

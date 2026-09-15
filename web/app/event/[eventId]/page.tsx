@@ -1,6 +1,14 @@
-import EventDetail from "@/components/EventDetail";
+import { redirect } from "next/navigation";
+import { getEvent } from "@/lib/db";
 
-export default async function EventRoute({ params }: { params: Promise<{ eventId: string }> }) {
+/** Legacy `/event/:id` → `/:sport/event/:id` */
+export default async function LegacyEventRoute({
+  params,
+}: {
+  params: Promise<{ eventId: string }>;
+}) {
   const { eventId } = await params;
-  return <EventDetail key={eventId} eventId={eventId} />;
+  const event = getEvent(eventId);
+  if (event?.sport) redirect(`/${event.sport}/event/${eventId}`);
+  redirect("/");
 }

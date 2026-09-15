@@ -146,7 +146,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
         <>
           <nav className="crumbs">
             <div className="crumbs-left">
-              <Link href="/">Matches</Link>
+              <Link href={`/${data.sport}`}>Matches</Link>
               <span className="crumb-sep">/</span>
               <span className="crumb-current">{data.title}</span>
               <span className="crumb-meta">
@@ -156,14 +156,6 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                 </span>
               </span>
             </div>
-            <a
-              className="btn btn-primary crumb-poly"
-              href={`https://polymarket.com/event/${data.slug}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Polymarket ↗
-            </a>
           </nav>
 
           <div className="event-page">

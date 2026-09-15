@@ -311,12 +311,10 @@ export function OrderbookScrubber({
     commitTime(at, reanchor);
   };
 
-  const stepFrame = (dir: -1 | 1) => {
-    const idx = upperBoundAt(frames, clockAt);
-    const next = clamp(idx + dir, 0, frames.length - 1);
-    const at = frames[next]!.capturedAt;
+  const stepMainByMinute = (dir: -1 | 1) => {
+    const at = clamp(clockAt + dir * 60_000, t0, t1);
     setPlaying(false);
-    setFollowLive(next >= frames.length - 1 && at >= t1 - 1);
+    setFollowLive(at >= t1 - 1);
     commitTime(at, true);
   };
 
@@ -373,7 +371,13 @@ export function OrderbookScrubber({
     <div className="poly-ob">
       <div className="poly-timeline">
         <div className="poly-controls">
-          <button type="button" className="ob-btn" disabled={coarseValue <= 0} onClick={() => stepFrame(-1)}>
+          <button
+            type="button"
+            className="ob-btn"
+            disabled={clockAt <= t0}
+            onClick={() => stepMainByMinute(-1)}
+            title="Back 1 minute"
+          >
             ‹
           </button>
           <button type="button" className="ob-btn" onClick={() => setPlaying((p) => !p)} disabled={frames.length < 2}>
@@ -382,8 +386,9 @@ export function OrderbookScrubber({
           <button
             type="button"
             className="ob-btn"
-            disabled={coarseValue >= COARSE_STEPS}
-            onClick={() => stepFrame(1)}
+            disabled={clockAt >= t1}
+            onClick={() => stepMainByMinute(1)}
+            title="Forward 1 minute"
           >
             ›
           </button>

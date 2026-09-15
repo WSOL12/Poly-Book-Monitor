@@ -31,7 +31,7 @@ export default function TokenDetail({ tokenId }: { tokenId: string }) {
           <nav className="crumbs">
             <Link href="/">Matches</Link>
             <span className="crumb-sep">/</span>
-            <Link href={`/event/${data.token.eventId}`}>{data.eventTitle}</Link>
+            <Link href={`/${data.token.sport}/event/${data.token.eventId}`}>{data.eventTitle}</Link>
             <span className="crumb-sep">/</span>
             <span className="crumb-current">{data.token.label}</span>
           </nav>
@@ -45,7 +45,7 @@ export default function TokenDetail({ tokenId }: { tokenId: string }) {
               <h1 className="event-title">{data.token.label}</h1>
               <div className="event-date">{data.eventTitle}</div>
             </div>
-            <Link href={`/event/${data.token.eventId}`} className="btn">
+            <Link href={`/${data.token.sport}/event/${data.token.eventId}`} className="btn">
               ← Event
             </Link>
           </header>

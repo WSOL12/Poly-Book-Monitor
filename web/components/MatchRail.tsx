@@ -89,7 +89,7 @@ export function MatchRail({
             return (
               <Link
                 key={event.eventId}
-                href={`/event/${event.eventId}`}
+                href={`/${event.sport}/event/${event.eventId}`}
                 className={`match-rail-item${on ? " match-rail-item-on" : ""}${
                   effectiveTab === "live" ? " match-rail-item-live" : ""
                 }`}
