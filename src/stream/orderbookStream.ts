@@ -1,14 +1,7 @@
 import WebSocket from "ws";
-import {
-  BOOK_ACTIVE_MS,
-  BOOK_DEAD_MS,
-  BOOK_QUIET_MS,
-  BOOK_SAMPLE_MS,
-  BOOK_THROTTLE_MS,
-} from "../config/env.ts";
 import { bestOf, depthSum, normalizeBookSide, parseLevels } from "../db/store.ts";
 import type { MonitorStore } from "../db/store.ts";
-import type { BookSnapshot, MonitoredToken } from "../types/monitoring.ts";
+import type { BookLevel, BookSnapshot, MonitoredToken } from "../types/monitoring.ts";
 import { polyFetch } from "../utils/polyNet.ts";
 
 const URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
@@ -17,12 +10,22 @@ const PING_MS = 10_000;
 const STALE_MS = 20_000;
 const WATCH_MS = 5_000;
 const MAX_BACKOFF_MS = 15_000;
+/** Background REST reconcile when we lack a seed book or best moved without sizes. */
+const REST_REFRESH_MS = 5_000;
 
 type Level = { price: string; size: string };
 type BookEvent = { event_type: "book"; asset_id: string; bids?: Level[]; asks?: Level[] };
+type PriceChange = {
+  asset_id: string;
+  price?: string;
+  size?: string;
+  side?: string;
+  best_bid?: string;
+  best_ask?: string;
+};
 type PriceChangeEvent = {
   event_type: "price_change";
-  price_changes?: Array<{ asset_id: string; best_bid?: string; best_ask?: string }>;
+  price_changes?: PriceChange[];
 };
 type BestBidAskEvent = {
   event_type: "best_bid_ask";
@@ -30,7 +33,7 @@ type BestBidAskEvent = {
   best_bid?: string;
   best_ask?: string;
 };
-type ParsedBook = { bids: ReturnType<typeof parseLevels>; asks: ReturnType<typeof parseLevels> };
+type ParsedBook = { bids: BookLevel[]; asks: BookLevel[] };
 
 export type TokenQuote = {
   bestBid: number | null;
@@ -70,7 +73,7 @@ function patchPayload(tokens: string[], operation: "subscribe" | "unsubscribe") 
   );
 }
 
-function bestPrice(levels: ReturnType<typeof parseLevels>, side: "bid" | "ask") {
+function bestPrice(levels: BookLevel[], side: "bid" | "ask") {
   if (!levels.length) return null;
   let best = levels[0]!.price;
   for (const level of levels) {
@@ -79,41 +82,40 @@ function bestPrice(levels: ReturnType<typeof parseLevels>, side: "bid" | "ask") 
   return best;
 }
 
-/** active = useful mid-market; dead = basically resolved; quiet = everything else. */
-function bookActivity(bestBid: number | null, bestAsk: number | null): "active" | "quiet" | "dead" {
-  const midBid = bestBid != null && bestBid > 0.05 && bestBid < 0.95;
-  const midAsk = bestAsk != null && bestAsk > 0.05 && bestAsk < 0.95;
-  if (midBid || midAsk) return "active";
-  const deadBid = bestBid != null && bestBid >= 0.98;
-  const deadAsk = bestAsk != null && bestAsk <= 0.02;
-  if (deadBid || deadAsk) return "dead";
-  return "quiet";
+/** Full L2 signature — skip write only when the book is identical. */
+function bookSignature(bids: BookLevel[], asks: BookLevel[]) {
+  const fmt = (levels: BookLevel[], side: "bid" | "ask") =>
+    normalizeBookSide(levels, side)
+      .map((l) => `${l.price}:${l.size}`)
+      .join(",");
+  return `${fmt(bids, "bid")}|${fmt(asks, "ask")}`;
 }
 
-function bookSignature(bids: ReturnType<typeof parseLevels>, asks: ReturnType<typeof parseLevels>) {
-  const bid = bestPrice(bids, "bid");
-  const ask = bestPrice(asks, "ask");
-  const topBid = bids[0];
-  const topAsk = asks[0];
-  return [
-    bid ?? "",
-    ask ?? "",
-    bids.length,
-    asks.length,
-    topBid ? `${topBid.price}:${topBid.size}` : "",
-    topAsk ? `${topAsk.price}:${topAsk.size}` : "",
-  ].join("|");
+function applyLevelUpdate(levels: BookLevel[], price: number, size: number): BookLevel[] {
+  const next = levels.filter((l) => l.price !== price);
+  if (size > 0) next.push({ price, size });
+  return next;
 }
 
-function writeGapMs(activity: "active" | "quiet" | "dead", changed: boolean) {
-  if (changed) {
-    if (activity === "active") return Math.min(BOOK_THROTTLE_MS, BOOK_ACTIVE_MS);
-    if (activity === "quiet") return BOOK_THROTTLE_MS;
-    return Math.max(BOOK_THROTTLE_MS, 2_000);
+function applyPriceChange(book: ParsedBook, change: PriceChange): ParsedBook {
+  let bids = book.bids;
+  let asks = book.asks;
+  const price = change.price != null ? Number(change.price) : NaN;
+  const size = change.size != null ? Number(change.size) : NaN;
+  const side = String(change.side ?? "").toUpperCase();
+
+  if (Number.isFinite(price) && Number.isFinite(size)) {
+    if (side === "BUY" || side === "BID") {
+      bids = applyLevelUpdate(bids, price, size);
+    } else if (side === "SELL" || side === "ASK") {
+      asks = applyLevelUpdate(asks, price, size);
+    }
   }
-  if (activity === "active") return BOOK_ACTIVE_MS;
-  if (activity === "quiet") return BOOK_QUIET_MS;
-  return BOOK_DEAD_MS;
+
+  return {
+    bids: normalizeBookSide(bids, "bid"),
+    asks: normalizeBookSide(asks, "ask"),
+  };
 }
 
 export class OrderbookStream {
@@ -129,15 +131,12 @@ export class OrderbookStream {
   private ignoreClose = false;
   private backoffMs = 1_000;
   private lastMessageAt = 0;
-  private readonly lastWriteAt = new Map<string, number>();
   private readonly lastBookSig = new Map<string, string>();
   private readonly tokenMeta = new Map<string, MonitoredToken>();
   private readonly bookCache = new Map<string, ParsedBook>();
-  private sampleTimer: ReturnType<typeof setInterval> | null = null;
   private messages = 0;
   private bookEvents = 0;
   private snapshotsWritten = 0;
-  private sampleWrites = 0;
   private readonly quotes = new Map<string, TokenQuote>();
   private readonly bookFetchAt = new Map<string, number>();
 
@@ -156,7 +155,7 @@ export class OrderbookStream {
       messages: this.messages,
       bookEvents: this.bookEvents,
       snapshotsWritten: this.snapshotsWritten,
-      sampleWrites: this.sampleWrites,
+      sampleWrites: 0,
       lastMessageAt: this.lastMessageAt || null,
       quotes: new Map(this.quotes),
     };
@@ -176,8 +175,6 @@ export class OrderbookStream {
 
   stop() {
     this.stopped = true;
-    if (this.sampleTimer) clearInterval(this.sampleTimer);
-    this.sampleTimer = null;
     if (this.syncTimer) clearTimeout(this.syncTimer);
     this.syncTimer = null;
     this.killSocket();
@@ -198,9 +195,6 @@ export class OrderbookStream {
     }
     for (const tokenId of [...this.quotes.keys()]) {
       if (!active.has(tokenId)) this.quotes.delete(tokenId);
-    }
-    for (const tokenId of [...this.lastWriteAt.keys()]) {
-      if (!active.has(tokenId)) this.lastWriteAt.delete(tokenId);
     }
     for (const tokenId of [...this.lastBookSig.keys()]) {
       if (!active.has(tokenId)) this.lastBookSig.delete(tokenId);
@@ -283,7 +277,6 @@ export class OrderbookStream {
       this.tokenSignature = live.join(",");
       if (live.length) ws.send(subscribePayload(live));
       this.startHeartbeat(ws);
-      this.startSampling();
       this.onEvent?.(`WSS connected (${live.length} tokens)`);
     });
 
@@ -342,24 +335,6 @@ export class OrderbookStream {
     }, WATCH_MS);
   }
 
-  private startSampling() {
-    if (this.sampleTimer) clearInterval(this.sampleTimer);
-    if (!BOOK_SAMPLE_MS || BOOK_SAMPLE_MS <= 0) return;
-    this.sampleTimer = setInterval(() => {
-      if (this.stopped || !this.bookCache.size) return;
-      const active = new Set(this.getTokens().map((row) => row.tokenId));
-      for (const [tokenId, book] of this.bookCache) {
-        if (!active.has(tokenId)) {
-          this.bookCache.delete(tokenId);
-          continue;
-        }
-        // Heartbeat sample — skip flat settled books most of the time.
-        if (!this.shouldWrite(tokenId, book.bids, book.asks, true)) continue;
-        this.writeSnapshot(tokenId, book.bids, book.asks, "wss", true);
-      }
-    }, BOOK_SAMPLE_MS);
-  }
-
   private stopHeartbeat() {
     if (this.ping) clearInterval(this.ping);
     if (this.watchdog) clearInterval(this.watchdog);
@@ -371,8 +346,6 @@ export class OrderbookStream {
     if (this.stopped) return;
     if (this.reconnect) return;
     this.onEvent?.(`WSS ${reason}, reconnecting`);
-    if (this.sampleTimer) clearInterval(this.sampleTimer);
-    this.sampleTimer = null;
     this.killSocket();
     const delay = this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS);
@@ -402,30 +375,12 @@ export class OrderbookStream {
     }
   }
 
-  private shouldWrite(
-    tokenId: string,
-    bids: ReturnType<typeof parseLevels>,
-    asks: ReturnType<typeof parseLevels>,
-    sampled = false
-  ) {
-    const bestBid = bestPrice(bids, "bid");
-    const bestAsk = bestPrice(asks, "ask");
-    const activity = bookActivity(bestBid, bestAsk);
+  /** Write only when the book actually changed. No timers, no activity tiers. */
+  private recordIfChanged(tokenId: string, bids: BookLevel[], asks: BookLevel[]) {
     const sig = bookSignature(bids, asks);
-    const prevSig = this.lastBookSig.get(tokenId);
-    const changed = prevSig == null || prevSig !== sig;
-    // Periodic sampler: never spam identical dead books.
-    if (sampled && !changed && activity === "dead") {
-      const last = this.lastWriteAt.get(tokenId) ?? 0;
-      if (Date.now() - last < BOOK_DEAD_MS) return false;
-    }
-    const gap = writeGapMs(activity, changed);
-    const now = Date.now();
-    const last = this.lastWriteAt.get(tokenId) ?? 0;
-    if (now - last < gap) return false;
-    this.lastWriteAt.set(tokenId, now);
+    if (this.lastBookSig.get(tokenId) === sig) return;
     this.lastBookSig.set(tokenId, sig);
-    return true;
+    this.writeSnapshot(tokenId, bids, asks);
   }
 
   private async fetchFullBook(tokenId: string) {
@@ -445,40 +400,36 @@ export class OrderbookStream {
     return restLevels >= wssLevels ? rest : wss;
   }
 
-  private queueBookWrite(
-    tokenId: string,
-    bids: ReturnType<typeof parseLevels>,
-    asks: ReturnType<typeof parseLevels>
-  ) {
-    this.bookCache.set(tokenId, { bids, asks });
-    const now = Date.now();
-    const lastFetch = this.bookFetchAt.get(tokenId) ?? 0;
-
-    if (now - lastFetch >= 2_000) {
-      this.bookFetchAt.set(tokenId, now);
-      void this.fetchFullBook(tokenId)
-        .then((rest) => {
-          const picked = this.pickBook({ bids, asks }, rest);
-          this.bookCache.set(tokenId, picked);
-          if (!this.shouldWrite(tokenId, picked.bids, picked.asks)) return;
-          this.writeSnapshot(tokenId, picked.bids, picked.asks, "wss");
-        })
-        .catch(() => {
-          if (this.shouldWrite(tokenId, bids, asks)) this.writeSnapshot(tokenId, bids, asks, "wss");
-        });
-      return;
-    }
-
-    if (this.shouldWrite(tokenId, bids, asks)) this.writeSnapshot(tokenId, bids, asks, "wss");
+  private queueBookWrite(tokenId: string, bids: BookLevel[], asks: BookLevel[]) {
+    const book = {
+      bids: normalizeBookSide(bids, "bid"),
+      asks: normalizeBookSide(asks, "ask"),
+    };
+    this.bookCache.set(tokenId, book);
+    this.recordIfChanged(tokenId, book.bids, book.asks);
+    this.maybeRefreshRest(tokenId);
   }
 
-  private writeSnapshot(
-    tokenId: string,
-    bids: ReturnType<typeof parseLevels>,
-    asks: ReturnType<typeof parseLevels>,
-    source: "wss",
-    sampled = false
-  ) {
+  private maybeRefreshRest(tokenId: string, force = false) {
+    const now = Date.now();
+    const lastFetch = this.bookFetchAt.get(tokenId) ?? 0;
+    if (!force && now - lastFetch < REST_REFRESH_MS) return;
+    this.bookFetchAt.set(tokenId, now);
+    const cached = this.bookCache.get(tokenId);
+    void this.fetchFullBook(tokenId)
+      .then((rest) => {
+        if (!rest) return;
+        const wss = this.bookCache.get(tokenId) ?? cached;
+        const picked = wss ? this.pickBook(wss, rest) : rest;
+        this.bookCache.set(tokenId, picked);
+        this.recordIfChanged(tokenId, picked.bids, picked.asks);
+      })
+      .catch(() => {
+        /* WSS path already handled */
+      });
+  }
+
+  private writeSnapshot(tokenId: string, bids: BookLevel[], asks: BookLevel[]) {
     if (!this.getTokens().some((row) => row.tokenId === tokenId)) {
       this.bookCache.delete(tokenId);
       return;
@@ -498,11 +449,10 @@ export class OrderbookStream {
       askDepth: depthSum(bookAsks),
       bids: bookBids,
       asks: bookAsks,
-      source,
+      source: "wss",
     };
     this.store.recordSnapshot(snap);
     this.snapshotsWritten++;
-    if (sampled) this.sampleWrites++;
     const prev = this.quotes.get(tokenId);
     this.quotes.set(tokenId, {
       bestBid: snap.bestBid,
@@ -517,27 +467,39 @@ export class OrderbookStream {
   private apply(event: BookEvent | PriceChangeEvent | BestBidAskEvent) {
     if (event.event_type === "book") {
       this.bookEvents++;
-      const bids = parseLevels(event.bids ?? []);
-      const asks = parseLevels(event.asks ?? []);
-      this.queueBookWrite(event.asset_id, bids, asks);
+      this.queueBookWrite(event.asset_id, parseLevels(event.bids ?? []), parseLevels(event.asks ?? []));
       return;
     }
 
     if (event.event_type === "price_change") {
       for (const change of event.price_changes ?? []) {
         const cached = this.bookCache.get(change.asset_id);
-        if (!cached) continue;
-        if (!this.shouldWrite(change.asset_id, cached.bids, cached.asks)) continue;
-        this.writeSnapshot(change.asset_id, cached.bids, cached.asks, "wss");
+        if (!cached) {
+          this.maybeRefreshRest(change.asset_id, true);
+          continue;
+        }
+        const next = applyPriceChange(cached, change);
+        this.bookCache.set(change.asset_id, next);
+        this.recordIfChanged(change.asset_id, next.bids, next.asks);
       }
       return;
     }
 
     if (event.event_type === "best_bid_ask") {
       const cached = this.bookCache.get(event.asset_id);
-      if (!cached) return;
-      if (!this.shouldWrite(event.asset_id, cached.bids, cached.asks)) return;
-      this.writeSnapshot(event.asset_id, cached.bids, cached.asks, "wss");
+      if (!cached) {
+        this.maybeRefreshRest(event.asset_id, true);
+        return;
+      }
+      const prevBid = bestPrice(cached.bids, "bid");
+      const prevAsk = bestPrice(cached.asks, "ask");
+      const nextBid = event.best_bid != null ? Number(event.best_bid) : prevBid;
+      const nextAsk = event.best_ask != null ? Number(event.best_ask) : prevAsk;
+      const bidChanged = nextBid != null && Number.isFinite(nextBid) && nextBid !== prevBid;
+      const askChanged = nextAsk != null && Number.isFinite(nextAsk) && nextAsk !== prevAsk;
+      if (!bidChanged && !askChanged) return;
+      // Best moved but event has no sizes — pull full book and record.
+      this.maybeRefreshRest(event.asset_id, true);
     }
   }
 }
