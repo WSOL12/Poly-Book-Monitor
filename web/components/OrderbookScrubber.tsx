@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SnapshotRow } from "@/lib/db";
 import { cls } from "@/lib/format";
 import { elapsedLabel, timelineClock, timelineDateTime } from "@/lib/time";
@@ -127,7 +127,7 @@ export function OrderbookScrubber({
   matchStart?: string | null;
   matchEnd?: number | null;
   seekAt?: number;
-  onFrame?: (snap: SnapshotRow, idx: number) => void;
+  onFrame?: (payload: { clockAt: number; snap: SnapshotRow; idx: number }) => void;
 }) {
   const frames = useMemo(
     () => cropScrubWindow(snapshots, matchStart, matchEnd),
@@ -167,6 +167,10 @@ export function OrderbookScrubber({
   const commitTime = (at: number, reanchorFine = false) => {
     const next = clamp(at, t0, t1 || t0);
     setAnchorAt(next);
+    // Push clock immediately so sidebar markets track the scrubber (don't wait for effect).
+    const idx = frames.length ? upperBoundAt(frames, next) : 0;
+    const frame = frames[idx];
+    if (frame) onFrameRef.current?.({ clockAt: next, snap: frame, idx });
     if (reanchorFine) {
       fineLockRef.current = null;
       setFineAnchorAt(next);
@@ -182,14 +186,13 @@ export function OrderbookScrubber({
     },
     enabled: Boolean(snap?.id),
     staleTime: Infinity,
-    placeholderData: (prev) => prev,
+    // Keep the previous ladder painted while the next frame's depth loads —
+    // timeline rows only have best bid/ask (empty bids/asks), which looks "flat".
+    placeholderData: keepPreviousData,
   });
 
-  const displaySnap: SnapshotRow | undefined = bookQuery.data
-    ? bookQuery.data
-    : snap
-      ? snap
-      : undefined;
+  const displaySnap: SnapshotRow | undefined = bookQuery.data ?? snap ?? undefined;
+  const ladderReady = Boolean(bookQuery.data && snap && bookQuery.data.id === snap.id);
 
   // First load only — never reset bars when the token series changes.
   useEffect(() => {
@@ -209,10 +212,10 @@ export function OrderbookScrubber({
   }, [frames, window, t0, t1, seekAt, startAtBeginning]);
 
   useEffect(() => {
-    if (!displaySnap) return;
-    // Report the book snapshot's real time + top-of-book so top bar / sidebar match the ladder.
-    onFrameRef.current?.(displaySnap, safeIdx);
-  }, [displaySnap?.id, displaySnap?.bestAsk, displaySnap?.bestBid, displaySnap?.capturedAt, safeIdx]);
+    if (!Number.isFinite(clockAt) || !frames.length) return;
+    // Shared scrub clock — parent maps all market prices from the dense quote series.
+    onFrameRef.current?.({ clockAt, snap: displaySnap ?? snap!, idx: safeIdx });
+  }, [clockAt, frames.length]);
 
   useEffect(() => {
     if (!frames.length) return;
@@ -266,21 +269,21 @@ export function OrderbookScrubber({
     }
   }, [playing, clockAt, fineAnchorAt, fineHalfMs]);
 
-  const askRows = useMemo(
-    () =>
-      displaySnap ? withTotals([...displaySnap.asks].sort((a, b) => a.price - b.price), "ask") : [],
-    [displaySnap]
-  );
-  const bidRows = useMemo(
-    () =>
-      displaySnap ? withTotals([...displaySnap.bids].sort((a, b) => b.price - a.price), "bid") : [],
-    [displaySnap]
-  );
+  const askRows = useMemo(() => {
+    const asks = bookQuery.data?.asks?.length ? bookQuery.data.asks : displaySnap?.asks ?? [];
+    return withTotals([...asks].sort((a, b) => a.price - b.price), "ask");
+  }, [bookQuery.data, displaySnap]);
+  const bidRows = useMemo(() => {
+    const bids = bookQuery.data?.bids?.length ? bookQuery.data.bids : displaySnap?.bids ?? [];
+    return withTotals([...bids].sort((a, b) => b.price - a.price), "bid");
+  }, [bookQuery.data, displaySnap]);
   const maxSize = useMemo(() => {
     let m = 0;
-    for (const l of [...(displaySnap?.asks ?? []), ...(displaySnap?.bids ?? [])]) m = Math.max(m, l.size);
+    for (const l of [...(bookQuery.data?.asks ?? displaySnap?.asks ?? []), ...(bookQuery.data?.bids ?? displaySnap?.bids ?? [])]) {
+      m = Math.max(m, l.size);
+    }
     return m;
-  }, [displaySnap]);
+  }, [bookQuery.data, displaySnap]);
 
   useEffect(() => {
     const askRoot = askScrollRef.current;
@@ -294,11 +297,10 @@ export function OrderbookScrubber({
     return <div className="empty">No orderbook snapshots recorded yet.</div>;
   }
 
+  const tob = ladderReady && bookQuery.data ? bookQuery.data : snap;
   const spread =
-    displaySnap.bestAsk != null && displaySnap.bestBid != null
-      ? Math.max(0, displaySnap.bestAsk - displaySnap.bestBid)
-      : null;
-  const last = displaySnap.bestAsk ?? displaySnap.bestBid ?? null;
+    tob.bestAsk != null && tob.bestBid != null ? Math.max(0, tob.bestAsk - tob.bestBid) : null;
+  const last = tob.bestAsk ?? tob.bestBid ?? null;
 
   const coarseValue =
     spanMs > 0 ? Math.round(((clockAt - t0) / spanMs) * COARSE_STEPS) : 0;
@@ -522,7 +524,7 @@ export function OrderbookScrubber({
         </div>
       </div>
 
-      <div className={`poly-book${bookQuery.isFetching && !bookQuery.data?.asks?.length ? " poly-book-loading" : ""}`}>
+      <div className={`poly-book${bookQuery.isFetching && !ladderReady ? " poly-book-loading" : ""}`}>
         <div className="poly-head">
           <span className="poly-trade-h">Trade {shortName}</span>
           <span>Price</span>

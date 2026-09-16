@@ -20,11 +20,16 @@ export function quotesEqual(a: FrameQuote[], b: FrameQuote[]) {
 
 export function quoteAtTime(snapshots: QuoteSnapshot[], atMs: number) {
   if (!snapshots.length) return { bestAsk: null as number | null, bestBid: null as number | null };
-  let row: QuoteSnapshot | null = null;
-  for (const snap of snapshots) {
-    if (snap.capturedAt <= atMs) row = snap;
-    else break;
+  let lo = 0;
+  let hi = snapshots.length - 1;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (snapshots[mid]!.capturedAt <= atMs) {
+      best = mid;
+      lo = mid + 1;
+    } else hi = mid - 1;
   }
-  const hit = row ?? snapshots[0];
+  const hit = snapshots[best]!;
   return { bestAsk: hit.bestAsk, bestBid: hit.bestBid };
 }
