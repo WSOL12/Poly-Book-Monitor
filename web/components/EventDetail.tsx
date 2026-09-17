@@ -231,7 +231,29 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                   Polymarket ↗
                 </a>
               </div>
-              {data.markets.map(
+              {data.markets
+                .slice()
+                .sort((a: { marketType: string; line: string | null }, b: { marketType: string; line: string | null }) => {
+                  const rank = (mt: string, line: string | null) => {
+                    if (mt === "moneyline") return 0;
+                    if (mt === "set_winner") return 10 + Number(line ?? 99);
+                    if (mt === "completed_match") return 20;
+                    if (mt === "set_handicap") return 30;
+                    if (mt === "game_handicap") return 40;
+                    if (mt === "total") {
+                      if (/^S1 Games/i.test(line ?? "")) return 50;
+                      if (/^S\d+ Games/i.test(line ?? "")) return 60;
+                      if (/^Sets/i.test(line ?? "")) return 70;
+                      if (/^Match/i.test(line ?? "")) return 80;
+                      return 90;
+                    }
+                    return 100;
+                  };
+                  const d = rank(a.marketType, a.line) - rank(b.marketType, b.line);
+                  if (d !== 0) return d;
+                  return (a.line ?? "").localeCompare(b.line ?? "", undefined, { numeric: true });
+                })
+                .map(
                 (market: {
                   marketId: string;
                   marketType: string;
@@ -253,7 +275,17 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                           ? "Moneyline"
                           : market.marketType === "weather"
                             ? (market.line ?? "Temp")
-                            : `O/U ${market.line ?? ""}`}
+                            : market.marketType === "set_winner"
+                              ? `Set ${market.line ?? "?"} Winner`
+                              : market.marketType === "set_handicap"
+                                ? `Set Handicap${market.line ? ` ${market.line}` : ""}`
+                                : market.marketType === "game_handicap"
+                                  ? `Game Spread${market.line ? ` ${market.line}` : ""}`
+                                  : market.marketType === "completed_match"
+                                    ? "Completed Match"
+                                    : market.line && /O\/U/i.test(market.line)
+                                      ? market.line
+                                      : `O/U ${market.line ?? ""}`}
                       </span>
                       {market.volume != null && market.volume > 0 ? (
                         <span className="aside-market-vol mono">{formatVolume(market.volume)}</span>
@@ -276,7 +308,10 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                               ? "No"
                               : "Yes"
                             : token.label;
-                        const showBidAsk = market.marketType === "total";
+                        const showBidAsk =
+                          market.marketType === "total" ||
+                          market.marketType === "set_handicap" ||
+                          market.marketType === "game_handicap";
                         return (
                           <button
                             key={token.tokenId}

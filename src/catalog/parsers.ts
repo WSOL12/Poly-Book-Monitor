@@ -9,7 +9,7 @@ import {
   type GammaEvent,
   type GammaMarket,
 } from "./gamma.ts";
-import type { MonitoredEvent, MonitoredMarket, MonitoredToken, MonitorSport } from "../types/monitoring.ts";
+import type { MarketType, MonitoredEvent, MonitoredMarket, MonitoredToken, MonitorSport } from "../types/monitoring.ts";
 
 function marketKey(eventId: string, market: GammaMarket) {
   const slug = market.slug?.trim();
@@ -146,11 +146,274 @@ function isMatchTotalMarket(market: GammaMarket) {
   if (!isTotalMarket(market)) return false;
   const q = market.question ?? "";
   const type = (market.sportsMarketType ?? "").toLowerCase();
+  // Tennis totals are handled by parseTennisPropMarket (Set 1 / Set 2 / Match / Sets).
+  if (type.startsWith("tennis_")) return false;
   if (/half|team|btts|both_teams|spread|corner|card|booking|shot/i.test(type)) return false;
   if (/1st half|2nd half|first half|second half|both teams|team o\/u|team total/i.test(q)) return false;
   if (type === "totals") return true;
   if (/\bcombined for\b|\bcombined points\b/i.test(q)) return true;
   return / vs\.?: O\/U| vs\.? .* O\/U/i.test(q);
+}
+
+/** Map Polymarket tennis O/U types → short sidebar labels (avoid dumping all as plain O/U). */
+function tennisTotalMeta(type: string, question: string): { head: string; line: string } | null {
+  const line =
+    question.match(/O\/U\s+([0-9.]+)/i)?.[1] ??
+    question.match(/\b(?:over|under)\s+([0-9.]+)/i)?.[1] ??
+    null;
+  if (!line) return null;
+  if (type === "tennis_first_set_totals") return { head: "S1 Games", line };
+  if (type === "tennis_set_games_totals") {
+    const setN = question.match(/Set\s+(\d+)\s+Games/i)?.[1] ?? "2";
+    return { head: `S${setN} Games`, line };
+  }
+  if (type === "tennis_match_totals") return { head: "Match", line };
+  if (type === "tennis_set_totals") return { head: "Sets", line };
+  return null;
+}
+
+function parseTennisOuMarket(
+  sport: MonitorSport,
+  eventId: string,
+  market: GammaMarket,
+  marketId: string,
+  question: string,
+  type: string
+): MonitoredMarket | null {
+  const meta = tennisTotalMeta(type, question);
+  if (!meta) return null;
+  const names = parseJsonField<string[]>(market.outcomes, []);
+  const tokens = parseJsonField<string[]>(market.clobTokenIds, []);
+  const overIdx = names.findIndex((n) => /over/i.test(n));
+  const underIdx = names.findIndex((n) => /under/i.test(n));
+  if (overIdx < 0 || underIdx < 0) return null;
+  const displayLine = `${meta.head} O/U ${meta.line}`;
+  const rows = [
+    token({
+      tokenId: tokens[overIdx] ?? "",
+      marketId,
+      eventId,
+      sport,
+      marketType: "total",
+      side: "over",
+      label: `Over ${meta.line}`,
+      line: displayLine,
+    }),
+    token({
+      tokenId: tokens[underIdx] ?? "",
+      marketId,
+      eventId,
+      sport,
+      marketType: "total",
+      side: "under",
+      label: `Under ${meta.line}`,
+      line: displayLine,
+    }),
+  ].filter((row): row is MonitoredToken => row != null);
+  if (rows.length < 2) return null;
+  return {
+    marketId,
+    eventId,
+    sport,
+    marketType: "total",
+    question,
+    line: displayLine,
+    tokens: rows,
+  };
+}
+
+function mapOutcomeToSide(
+  name: string,
+  home: string,
+  away: string
+): { side: "home" | "away"; label: string } | null {
+  if (sameTeam(name, home) || mentionsTeam(name, home)) return { side: "home", label: name };
+  if (sameTeam(name, away) || mentionsTeam(name, away)) return { side: "away", label: name };
+  return null;
+}
+
+function parseTennisPlayerMarket(
+  sport: MonitorSport,
+  eventId: string,
+  home: string,
+  away: string,
+  market: GammaMarket,
+  marketId: string,
+  question: string,
+  marketType: Extract<MarketType, "set_winner" | "set_handicap" | "game_handicap">,
+  line: string | null
+): MonitoredMarket | null {
+  const names = parseJsonField<string[]>(market.outcomes, []);
+  const tokens = parseJsonField<string[]>(market.clobTokenIds, []);
+  if (names.length < 2 || tokens.length < 2) return null;
+  const rows: MonitoredToken[] = [];
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i]!;
+    const mapped = mapOutcomeToSide(name, home, away);
+    if (!mapped) continue;
+    const row = token({
+      tokenId: tokens[i] ?? "",
+      marketId,
+      eventId,
+      sport,
+      marketType,
+      side: mapped.side,
+      label: mapped.label,
+      line,
+    });
+    if (row) rows.push(row);
+  }
+  if (rows.length < 2) {
+    // Fall back to outcome order when name matching fails (doubles abbreviations).
+    const a = token({
+      tokenId: tokens[0] ?? "",
+      marketId,
+      eventId,
+      sport,
+      marketType,
+      side: "home",
+      label: names[0]!,
+      line,
+    });
+    const b = token({
+      tokenId: tokens[1] ?? "",
+      marketId,
+      eventId,
+      sport,
+      marketType,
+      side: "away",
+      label: names[1]!,
+      line,
+    });
+    if (!a || !b) return null;
+    return { marketId, eventId, sport, marketType, question, line, tokens: [a, b] };
+  }
+  return { marketId, eventId, sport, marketType, question, line, tokens: rows.slice(0, 2) };
+}
+
+function parseTennisCompletedMatch(
+  sport: MonitorSport,
+  eventId: string,
+  market: GammaMarket,
+  marketId: string,
+  question: string
+): MonitoredMarket | null {
+  const yn = yesNo(market);
+  if (!yn?.yes.tokenId || !yn.no.tokenId) return null;
+  const rows = [
+    token({
+      tokenId: yn.yes.tokenId,
+      marketId,
+      eventId,
+      sport,
+      marketType: "completed_match",
+      side: "yes",
+      label: "Yes",
+      line: null,
+    }),
+    token({
+      tokenId: yn.no.tokenId,
+      marketId,
+      eventId,
+      sport,
+      marketType: "completed_match",
+      side: "no",
+      label: "No",
+      line: null,
+    }),
+  ].filter((row): row is MonitoredToken => row != null);
+  if (rows.length < 2) return null;
+  return {
+    marketId,
+    eventId,
+    sport,
+    marketType: "completed_match",
+    question,
+    line: null,
+    tokens: rows,
+  };
+}
+
+function parseTennisPropMarket(
+  sport: MonitorSport,
+  eventId: string,
+  home: string,
+  away: string,
+  market: GammaMarket,
+  marketId: string
+): MonitoredMarket | null {
+  const type = (market.sportsMarketType ?? "").toLowerCase();
+  const question = market.question ?? "";
+  if (!type.startsWith("tennis_")) return null;
+
+  if (
+    type === "tennis_first_set_totals" ||
+    type === "tennis_set_games_totals" ||
+    type === "tennis_match_totals" ||
+    type === "tennis_set_totals"
+  ) {
+    return parseTennisOuMarket(sport, eventId, market, marketId, question, type);
+  }
+
+  if (type === "tennis_first_set_winner" || type === "tennis_set_winner") {
+    const setN =
+      type === "tennis_first_set_winner"
+        ? "1"
+        : (question.match(/Set\s+(\d+)\s+Winner/i)?.[1] ?? "2");
+    return parseTennisPlayerMarket(
+      sport,
+      eventId,
+      home,
+      away,
+      market,
+      marketId,
+      question,
+      "set_winner",
+      setN
+    );
+  }
+
+  if (type === "tennis_set_handicap") {
+    const line =
+      question.match(/\(([+-]?[0-9.]+)\)/)?.[1] ??
+      question.match(/([+-]?[0-9.]+)\s*vs/i)?.[1] ??
+      null;
+    return parseTennisPlayerMarket(
+      sport,
+      eventId,
+      home,
+      away,
+      market,
+      marketId,
+      question,
+      "set_handicap",
+      line
+    );
+  }
+
+  if (type === "tennis_game_handicap") {
+    const line =
+      question.match(/\(([+-]?[0-9.]+)\)/)?.[1] ??
+      question.match(/([+-]?[0-9.]+)\s*vs/i)?.[1] ??
+      null;
+    return parseTennisPlayerMarket(
+      sport,
+      eventId,
+      home,
+      away,
+      market,
+      marketId,
+      question,
+      "game_handicap",
+      line
+    );
+  }
+
+  if (type === "tennis_completed_match") {
+    return parseTennisCompletedMatch(sport, eventId, market, marketId, question);
+  }
+
+  return null;
 }
 
 function parseTotalsForMatch(
@@ -461,6 +724,15 @@ function parseEventMarkets(sport: MonitorSport, event: GammaEvent): MonitoredEve
     if (market.closed) continue;
     const marketId = marketKey(event.id, market);
     const question = market.question ?? "";
+
+    if (sport === "tennis") {
+      const tennis = parseTennisPropMarket(sport, event.id, home, away, market, marketId);
+      if (tennis && !seenMarketIds.has(tennis.marketId)) {
+        seenMarketIds.add(tennis.marketId);
+        markets.push(tennis);
+        continue;
+      }
+    }
 
     if (isMatchTotalMarket(market)) {
       const parsed = ouFromMarket(sport, event.id, market, marketId, question);

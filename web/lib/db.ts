@@ -47,7 +47,7 @@ export type EventRow = {
 
 export type MarketRow = {
   marketId: string;
-  marketType: "moneyline" | "total" | "weather";
+  marketType: string;
   question: string;
   line: string | null;
   volume: number | null;

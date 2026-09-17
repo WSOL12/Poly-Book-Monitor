@@ -172,10 +172,20 @@ export function EventOrderbook({
     active?.marketType === "moneyline"
       ? "Moneyline"
       : active?.marketType === "total"
-        ? `O/U ${active.line ?? ""}`
-        : active?.marketType === "weather"
-          ? `High temp · ${active.label}${activeSide === "no" ? " No" : " Yes"}`
-          : "Market";
+        ? active.line && /O\/U/i.test(active.line)
+          ? active.line
+          : `O/U ${active.line ?? ""}`
+        : active?.marketType === "set_winner"
+          ? `Set ${active.line ?? "?"} Winner`
+          : active?.marketType === "set_handicap"
+            ? `Set Handicap${active.line ? ` ${active.line}` : ""}`
+            : active?.marketType === "game_handicap"
+              ? `Game Spread${active.line ? ` ${active.line}` : ""}`
+              : active?.marketType === "completed_match"
+                ? "Completed Match"
+                : active?.marketType === "weather"
+                  ? `High temp · ${active.label}${activeSide === "no" ? " No" : " Yes"}`
+                  : "Market";
 
   const scrubberLabel =
     active?.marketType === "weather"
