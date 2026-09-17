@@ -97,6 +97,61 @@ function applyLevelUpdate(levels: BookLevel[], price: number, size: number): Boo
   return next;
 }
 
+function isCrossed(book: ParsedBook) {
+  const bb = bestOf(book.bids, "bid");
+  const ba = bestOf(book.asks, "ask");
+  return bb != null && ba != null && bb >= ba;
+}
+
+/** Drop stale opposite-side levels so bid never sits at/above ask. */
+function uncrossBook(bids: BookLevel[], asks: BookLevel[]): ParsedBook {
+  let nextBids = bids;
+  let nextAsks = asks;
+  for (let i = 0; i < 6; i++) {
+    const bb = bestOf(nextBids, "bid");
+    const ba = bestOf(nextAsks, "ask");
+    if (bb == null || ba == null || bb < ba) break;
+    // Prefer keeping the ask ladder when bids went stale after an ask improve.
+    nextBids = nextBids.filter((l) => l.price < ba);
+    const bb2 = bestOf(nextBids, "bid");
+    if (bb2 != null && ba <= bb2) {
+      nextAsks = nextAsks.filter((l) => l.price > bb2);
+    }
+  }
+  return {
+    bids: normalizeBookSide(nextBids, "bid"),
+    asks: normalizeBookSide(nextAsks, "ask"),
+  };
+}
+
+/** Trim depth to authoritative TOB from price_change / best_bid_ask payloads. */
+function trimToTob(
+  bids: BookLevel[],
+  asks: BookLevel[],
+  bestBid: number | null,
+  bestAsk: number | null
+): ParsedBook {
+  let nextBids = bids;
+  let nextAsks = asks;
+  if (bestBid != null && Number.isFinite(bestBid)) {
+    nextBids = nextBids.filter((l) => l.price <= bestBid + 1e-12);
+  }
+  if (bestAsk != null && Number.isFinite(bestAsk)) {
+    nextAsks = nextAsks.filter((l) => l.price >= bestAsk - 1e-12);
+  }
+  if (
+    bestBid != null &&
+    bestAsk != null &&
+    Number.isFinite(bestBid) &&
+    Number.isFinite(bestAsk) &&
+    bestBid < bestAsk
+  ) {
+    nextBids = nextBids.filter((l) => l.price < bestAsk);
+    nextAsks = nextAsks.filter((l) => l.price > bestBid);
+  }
+  return uncrossBook(nextBids, nextAsks);
+}
+
 function applyPriceChange(book: ParsedBook, change: PriceChange): ParsedBook {
   let bids = book.bids;
   let asks = book.asks;
@@ -112,10 +167,21 @@ function applyPriceChange(book: ParsedBook, change: PriceChange): ParsedBook {
     }
   }
 
-  return {
-    bids: normalizeBookSide(bids, "bid"),
-    asks: normalizeBookSide(asks, "ask"),
-  };
+  const tobBid = change.best_bid != null ? Number(change.best_bid) : null;
+  const tobAsk = change.best_ask != null ? Number(change.best_ask) : null;
+  if (
+    (tobBid != null && Number.isFinite(tobBid)) ||
+    (tobAsk != null && Number.isFinite(tobAsk))
+  ) {
+    return trimToTob(
+      bids,
+      asks,
+      tobBid != null && Number.isFinite(tobBid) ? tobBid : null,
+      tobAsk != null && Number.isFinite(tobAsk) ? tobAsk : null
+    );
+  }
+
+  return uncrossBook(bids, asks);
 }
 
 export class OrderbookStream {
@@ -394,17 +460,20 @@ export class OrderbookStream {
   }
 
   private pickBook(wss: ParsedBook, rest: ParsedBook | null) {
-    if (!rest) return wss;
-    const wssLevels = wss.bids.length + wss.asks.length;
-    const restLevels = rest.bids.length + rest.asks.length;
-    return restLevels >= wssLevels ? rest : wss;
+    if (!rest) return uncrossBook(wss.bids, wss.asks);
+    const wssBook = uncrossBook(wss.bids, wss.asks);
+    const restBook = uncrossBook(rest.bids, rest.asks);
+    const wssBad = isCrossed(wss);
+    const restBad = isCrossed(rest);
+    if (wssBad && !restBad) return restBook;
+    if (restBad && !wssBad) return wssBook;
+    const wssLevels = wssBook.bids.length + wssBook.asks.length;
+    const restLevels = restBook.bids.length + restBook.asks.length;
+    return restLevels >= wssLevels ? restBook : wssBook;
   }
 
   private queueBookWrite(tokenId: string, bids: BookLevel[], asks: BookLevel[]) {
-    const book = {
-      bids: normalizeBookSide(bids, "bid"),
-      asks: normalizeBookSide(asks, "ask"),
-    };
+    const book = uncrossBook(bids, asks);
     this.bookCache.set(tokenId, book);
     this.recordIfChanged(tokenId, book.bids, book.asks);
     this.maybeRefreshRest(tokenId);
@@ -498,7 +567,16 @@ export class OrderbookStream {
       const bidChanged = nextBid != null && Number.isFinite(nextBid) && nextBid !== prevBid;
       const askChanged = nextAsk != null && Number.isFinite(nextAsk) && nextAsk !== prevAsk;
       if (!bidChanged && !askChanged) return;
-      // Best moved but event has no sizes — pull full book and record.
+
+      const trimmed = trimToTob(
+        cached.bids,
+        cached.asks,
+        nextBid != null && Number.isFinite(nextBid) ? nextBid : null,
+        nextAsk != null && Number.isFinite(nextAsk) ? nextAsk : null
+      );
+      this.bookCache.set(event.asset_id, trimmed);
+      this.recordIfChanged(event.asset_id, trimmed.bids, trimmed.asks);
+      // Sizes may be wrong after TOB-only trim — pull full book.
       this.maybeRefreshRest(event.asset_id, true);
     }
   }

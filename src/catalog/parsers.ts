@@ -94,10 +94,18 @@ function splitSides(title: string): [string, string] | null {
 }
 
 function mentionsTeam(q: string, team: string) {
-  const t = team.toLowerCase();
-  if (t.length >= 4 && q.toLowerCase().includes(t)) return true;
+  const ql = q.toLowerCase();
+  const t = team.toLowerCase().trim();
+  if (!t) return false;
+  // Long names: substring is fine ("Sunderland AFC").
+  if (t.length >= 4 && ql.includes(t)) return true;
+  // Short codes ("AZ", "PSG"): require a token boundary so "AZ" ≠ "Azerbaijan".
+  if (t.length >= 2) {
+    const escaped = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, "i").test(q)) return true;
+  }
   const tok = team.split(/\s+/).filter((p) => p.length >= 3 && !/^(fc|cf|sc|afc|the)$/i.test(p));
-  return tok.some((p) => q.toLowerCase().includes(p.toLowerCase()));
+  return tok.some((p) => ql.includes(p.toLowerCase()));
 }
 
 function sameTeam(a: string, b: string) {
@@ -289,7 +297,11 @@ function parseMoneyline(
   }
 
   if (yn && /will .+\s+win/i.test(question)) {
-    const side = mentionsTeam(question, home) && !mentionsTeam(question, away) ? home : away;
+    const homeHit = mentionsTeam(question, home);
+    const awayHit = mentionsTeam(question, away);
+    // Need exactly one side — short names used to miss and wrongly default to away.
+    if (homeHit === awayHit) return null;
+    const side = homeHit ? home : away;
     const row = token({
       tokenId: yn.yes.tokenId,
       marketId,

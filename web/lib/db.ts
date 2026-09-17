@@ -167,6 +167,45 @@ function levelsFromJson(raw: string): Array<{ price: number; size: number }> {
   }
 }
 
+function bestLevel(
+  levels: Array<{ price: number; size: number }>,
+  side: "bid" | "ask"
+): number | null {
+  let best: number | null = null;
+  for (const level of levels) {
+    if (best == null || (side === "bid" ? level.price > best : level.price < best)) best = level.price;
+  }
+  return best;
+}
+
+/** Repair crossed books written before WSS uncross (bid >= ask). */
+function sanitizeBook(bids: Array<{ price: number; size: number }>, asks: Array<{ price: number; size: number }>) {
+  let nextBids = bids;
+  let nextAsks = asks;
+  for (let i = 0; i < 6; i++) {
+    const bb = bestLevel(nextBids, "bid");
+    const ba = bestLevel(nextAsks, "ask");
+    if (bb == null || ba == null || bb < ba) break;
+    nextBids = nextBids.filter((l) => l.price < ba);
+  }
+  nextBids = [...nextBids].sort((a, b) => b.price - a.price);
+  nextAsks = [...nextAsks].sort((a, b) => a.price - b.price);
+  return {
+    bids: nextBids,
+    asks: nextAsks,
+    bestBid: bestLevel(nextBids, "bid"),
+    bestAsk: bestLevel(nextAsks, "ask"),
+  };
+}
+
+function sanitizeQuote(bestBid: number | null, bestAsk: number | null) {
+  if (bestBid != null && bestAsk != null && bestBid >= bestAsk) {
+    // Prefer ask when TOB was crossed — matches uncrossBook recorder bias.
+    return { bestBid: null as number | null, bestAsk };
+  }
+  return { bestBid, bestAsk };
+}
+
 function openDay(sport: Sport, day: string, readonly = true) {
   const path = dbPathForDay(sport, day);
   if (!existsSync(path)) return null;
@@ -620,10 +659,11 @@ export function getTokenHistory(tokenId: string): {
     };
     for (let i = 0; i < n; i++) {
       const row = rawRows[i]!;
+      const q = sanitizeQuote(row.bestBid, row.bestAsk);
       timeline.id[i] = row.id;
       timeline.at[i] = row.capturedAt;
-      timeline.bestBid[i] = row.bestBid;
-      timeline.bestAsk[i] = row.bestAsk;
+      timeline.bestBid[i] = q.bestBid;
+      timeline.bestAsk[i] = q.bestAsk;
       timeline.day[i] = loc.day;
     }
 
@@ -679,15 +719,18 @@ function readSnapshotRow(db: Database.Database, id: number, day?: string): Snaps
       }
     | undefined;
   if (!row) return null;
+  const bids = levelsFromJson(row.bidsJson);
+  const asks = levelsFromJson(row.asksJson);
+  const clean = sanitizeBook(bids, asks);
   return {
     id: row.id,
     capturedAt: row.capturedAt,
-    bestBid: row.bestBid,
-    bestAsk: row.bestAsk,
+    bestBid: clean.bestBid ?? row.bestBid,
+    bestAsk: clean.bestAsk ?? row.bestAsk,
     bidDepth: row.bidDepth,
     askDepth: row.askDepth,
-    bids: levelsFromJson(row.bidsJson),
-    asks: levelsFromJson(row.asksJson),
+    bids: clean.bids,
+    asks: clean.asks,
     ...(day ? { day } : {}),
   };
 }
@@ -799,10 +842,11 @@ export function getEventQuoteSeries(eventId: string): Record<
           !prev || prev.bestBid !== row.bestBid || prev.bestAsk !== row.bestAsk;
         // Keep every quote change; heartbeat every 2s so scrubbing always has a nearby sample.
         if (!changed && row.capturedAt - lastKeep < 2_000) continue;
+        const q = sanitizeQuote(row.bestBid, row.bestAsk);
         series.push({
           capturedAt: row.capturedAt,
-          bestBid: row.bestBid,
-          bestAsk: row.bestAsk,
+          bestBid: q.bestBid,
+          bestAsk: q.bestAsk,
         });
         lastKeep = row.capturedAt;
       }
@@ -842,10 +886,11 @@ export function getEventQuotesAt(
         | { bestBid: number | null; bestAsk: number | null; capturedAt: number }
         | undefined;
       if (!row) continue;
+      const q = sanitizeQuote(row.bestBid, row.bestAsk);
       out[tokenId] = {
         capturedAt: row.capturedAt,
-        bestBid: row.bestBid,
-        bestAsk: row.bestAsk,
+        bestBid: q.bestBid,
+        bestAsk: q.bestAsk,
       };
     }
     return out;
