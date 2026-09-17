@@ -148,6 +148,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
         matchStart: data.startTime,
         finishedAt: data.finishedAt,
         lastScoreAt,
+        lastSnapshotAt: data.lastSnapshotAt ?? null,
       })
     : null;
 

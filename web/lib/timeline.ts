@@ -130,6 +130,10 @@ function sportMatchBounds(sport?: string | null) {
   if (sport === "football" || sport === "mlb") {
     return { typicalMs: 3.5 * 60 * 60_000, maxMs: 5 * 60 * 60_000 };
   }
+  if (sport === "tennis") {
+    // Best-of-3 / best-of-5 — never use soccer's 105m cap for open books.
+    return { typicalMs: 2.5 * 60 * 60_000, maxMs: 6 * 60 * 60_000 };
+  }
   // Soccer: 90 + HT + stoppage; allow ET/extra without opening a multi-hour SUS gap
   return { typicalMs: 105 * 60_000, maxMs: 150 * 60_000 };
 }
@@ -139,18 +143,31 @@ function sportMatchBounds(sport?: string | null) {
  * - `finished_at` is sometimes stamped early (mid-game SUS)
  * - `lastScoreAt` can be hours late (next poll after VFT), so only trust it
  *   inside a plausible post-kickoff window — never stretch the bar to ~5h
+ * - Tennis open watch: do NOT invent kickoff+typical end — scrub to last snap
  */
 export function resolveMatchEnd(opts: {
   sport?: string | null;
   matchStart?: string | null;
   finishedAt?: number | null;
   lastScoreAt?: number | null;
+  lastSnapshotAt?: number | null;
 }): number | null {
   const kickoff = opts.matchStart ? Date.parse(opts.matchStart) : NaN;
   const finish =
     opts.finishedAt != null && Number.isFinite(opts.finishedAt) ? Number(opts.finishedAt) : NaN;
   const lastScore =
     opts.lastScoreAt != null && Number.isFinite(opts.lastScoreAt) ? Number(opts.lastScoreAt) : NaN;
+  const lastSnap =
+    opts.lastSnapshotAt != null && Number.isFinite(opts.lastSnapshotAt)
+      ? Number(opts.lastSnapshotAt)
+      : NaN;
+
+  // Open tennis (prematch → stop): keep the scrubber on recorded books, not a fake FT.
+  if (opts.sport === "tennis" && !Number.isFinite(finish)) {
+    if (Number.isFinite(lastSnap)) return lastSnap;
+    if (Number.isFinite(lastScore)) return lastScore;
+    return null;
+  }
 
   let end = Number.isFinite(finish) ? finish : NaN;
 
