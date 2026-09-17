@@ -733,6 +733,7 @@ export function getSnapshotById(id: number, sport?: Sport | null, day?: string |
   return null;
 }
 
+/** Dense bid/ask series for sidebar scrub — every TOB change in the match window. */
 export function getEventQuoteSeries(eventId: string): Record<
   string,
   Array<{ capturedAt: number; bestBid: number | null; bestAsk: number | null }>
@@ -762,56 +763,91 @@ export function getEventQuoteSeries(eventId: string): Record<
     let lo = span.a;
     let hi = span.b;
     if (Number.isFinite(startMs) && Number.isFinite(finishMs) && finishMs > startMs) {
-      const matchLo = Math.max(span.a, startMs - 5 * 60_000);
-      const matchHi = Math.min(span.b, finishMs + 10 * 60_000);
-      if (matchHi - matchLo >= 0.35 * (span.b - span.a)) {
-        lo = span.a;
-        hi = span.b;
-      } else {
-        lo = Math.min(matchLo, span.a);
-        hi = Math.max(matchHi, span.b);
+      lo = Math.max(span.a, startMs - 5 * 60_000);
+      // Prefer last score / recording over a premature finished_at for the series window.
+      hi = span.b;
+      const matchHi = Math.min(span.b, finishMs + 30 * 60_000);
+      if (matchHi - lo >= 0.2 * (span.b - span.a)) {
+        hi = Math.max(matchHi, Math.min(span.b, startMs + 3 * 60 * 60_000));
       }
     }
-    const TARGET = 720;
-    const step = Math.max(1_000, Math.floor((hi - lo) / Math.max(1, TARGET - 1)));
 
-    const atTimes: number[] = [];
-    for (let t = lo; t <= hi; t += step) atTimes.push(t);
-    if (atTimes[atTimes.length - 1] !== hi) atTimes.push(hi);
-    if (atTimes[0] !== span.a) atTimes.unshift(span.a);
-    if (atTimes[atTimes.length - 1] !== span.b) atTimes.push(span.b);
+    const stmt = db.prepare(
+      `SELECT ts AS capturedAt, bb AS bestBid, ba AS bestAsk
+       FROM ob
+       WHERE tid = ? AND ts >= ? AND ts <= ?
+       ORDER BY ts ASC`
+    );
+
+    const out: Record<
+      string,
+      Array<{ capturedAt: number; bestBid: number | null; bestAsk: number | null }>
+    > = {};
+
+    for (const { tokenId } of tokens) {
+      const rows = stmt.all(tokenId, lo, hi) as Array<{
+        capturedAt: number;
+        bestBid: number | null;
+        bestAsk: number | null;
+      }>;
+      const series: Array<{ capturedAt: number; bestBid: number | null; bestAsk: number | null }> =
+        [];
+      let lastKeep = -Infinity;
+      for (const row of rows) {
+        const prev = series[series.length - 1];
+        const changed =
+          !prev || prev.bestBid !== row.bestBid || prev.bestAsk !== row.bestAsk;
+        // Keep every quote change; heartbeat every 2s so scrubbing always has a nearby sample.
+        if (!changed && row.capturedAt - lastKeep < 2_000) continue;
+        series.push({
+          capturedAt: row.capturedAt,
+          bestBid: row.bestBid,
+          bestAsk: row.bestAsk,
+        });
+        lastKeep = row.capturedAt;
+      }
+      out[tokenId] = series;
+    }
+
+    return out;
+  } finally {
+    db.close();
+  }
+}
+
+/** Exact top-of-book for every token at scrub time (not the downsampled series). */
+export function getEventQuotesAt(
+  eventId: string,
+  atMs: number
+): Record<string, { capturedAt: number; bestBid: number | null; bestAsk: number | null }> {
+  const loc = findLoc(eventId);
+  if (!loc) return {};
+  const db = openDay(loc.sport, loc.day);
+  if (!db) return {};
+  try {
+    const tokens = db.prepare(`SELECT id AS tokenId FROM tk WHERE eid = ?`).all(eventId) as Array<{
+      tokenId: string;
+    }>;
+    if (!tokens.length || !Number.isFinite(atMs)) return {};
 
     const stmt = db.prepare(
       `SELECT bb AS bestBid, ba AS bestAsk, ts AS capturedAt
        FROM ob WHERE tid = ? AND ts <= ? ORDER BY ts DESC LIMIT 1`
     );
 
-    const out: Record<string, Array<{ capturedAt: number; bestBid: number | null; bestAsk: number | null }>> =
+    const out: Record<string, { capturedAt: number; bestBid: number | null; bestAsk: number | null }> =
       {};
-
     for (const { tokenId } of tokens) {
-      const series: Array<{ capturedAt: number; bestBid: number | null; bestAsk: number | null }> = [];
-      let sinceKeep = 0;
-      for (const at of atTimes) {
-        const row = stmt.get(tokenId, at) as
-          | { bestBid: number | null; bestAsk: number | null; capturedAt: number }
-          | undefined;
-        if (!row) continue;
-        const prev = series[series.length - 1];
-        const changed = !prev || prev.bestBid !== row.bestBid || prev.bestAsk !== row.bestAsk;
-        sinceKeep++;
-        if (!changed && sinceKeep < 8) continue;
-        sinceKeep = 0;
-        if (prev && prev.capturedAt === row.capturedAt) continue;
-        series.push({
-          capturedAt: row.capturedAt,
-          bestBid: row.bestBid,
-          bestAsk: row.bestAsk,
-        });
-      }
-      out[tokenId] = series;
+      const row = stmt.get(tokenId, atMs) as
+        | { bestBid: number | null; bestAsk: number | null; capturedAt: number }
+        | undefined;
+      if (!row) continue;
+      out[tokenId] = {
+        capturedAt: row.capturedAt,
+        bestBid: row.bestBid,
+        bestAsk: row.bestAsk,
+      };
     }
-
     return out;
   } finally {
     db.close();

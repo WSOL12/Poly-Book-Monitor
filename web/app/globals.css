@@ -2248,6 +2248,24 @@ tr.row-entered:hover { filter: brightness(1.08); }
   white-space: nowrap;
 }
 
+.aside-quotes {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.aside-bid {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--green);
+}
+
+.aside-quote-sep {
+  color: var(--faint);
+  font-weight: 500;
+}
+
 .ml-pills {
   display: none;
 }
@@ -2353,6 +2371,34 @@ tr.row-entered:hover { filter: brightness(1.08); }
 .poly-out-price {
   font-size: 14px;
   font-variant-numeric: tabular-nums;
+}
+
+.poly-out-quotes {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.poly-out-bid {
+  color: var(--green);
+  font-weight: 700;
+}
+
+.poly-out-ask {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.poly-out-sep {
+  color: var(--faint);
+  font-weight: 500;
+}
+
+.poly-out-off .poly-out-bid,
+.poly-out-off .poly-out-ask {
+  opacity: 0.85;
 }
 
 .poly-out-off {
@@ -2695,14 +2741,91 @@ tr.row-entered:hover { filter: brightness(1.08); }
   gap: 12px;
 }
 
-.sb-simple .sb-timeline {
+.sb-simple .sb-timeline,
+.sb-simple .sb-goals {
   grid-column: 1 / -1;
 }
 
-.sb-sets .sb-timeline {
+.sb-sets .sb-timeline,
+.sb-sets .sb-goals {
   margin-top: 4px;
   padding-top: 8px;
   border-top: 1px solid var(--line);
+}
+
+.sb-goals {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.sb-goals-label {
+  flex: none;
+  margin-top: 3px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.sb-goals-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sb-goal {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.sb-goal-home {
+  border-color: color-mix(in srgb, var(--blue) 40%, var(--line-2));
+  background: color-mix(in srgb, var(--blue) 12%, var(--panel-2));
+}
+
+.sb-goal-away {
+  border-color: color-mix(in srgb, var(--green) 40%, var(--line-2));
+  background: color-mix(in srgb, var(--green) 12%, var(--panel-2));
+}
+
+.sb-goal-min {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.sb-goal-team {
+  color: var(--muted);
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-goal-score {
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.sb-goals-empty {
+  justify-content: center;
+  border-top: 1px solid var(--line);
+  padding: 8px 4px 2px;
+  font-size: 11px;
+  color: var(--faint);
+  text-align: center;
 }
 
 .sb-timeline {

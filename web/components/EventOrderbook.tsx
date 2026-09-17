@@ -64,7 +64,6 @@ export function EventOrderbook({
   onTokenChange,
   frameQuotes,
   seekAt,
-  activeBook,
   eventVolume,
   sport,
 }: {
@@ -72,14 +71,12 @@ export function EventOrderbook({
   eventFinished?: boolean;
   matchStart?: string | null;
   matchEnd?: number | null;
-  onFrame?: (capturedAt: number, book?: { bestBid: number | null; bestAsk: number | null }) => void;
+  onFrame?: (capturedAt: number) => void;
   tokenId?: string;
   onTokenChange?: (tokenId: string) => void;
   frameQuotes?: Map<string, { bestBid: number | null; bestAsk: number | null }>;
   /** Shared scrub time across moneyline / draw / O-U on the same match. */
   seekAt?: number;
-  /** Live top-of-book for the selected token — must match the ladder below. */
-  activeBook?: { bestBid: number | null; bestAsk: number | null } | null;
   /** Event-level Polymarket volume fallback when market volume is missing. */
   eventVolume?: number | null;
   sport?: string;
@@ -136,8 +133,8 @@ export function EventOrderbook({
   });
 
   const handleFrame = useCallback(
-    (snap: { capturedAt: number; bestBid?: number | null; bestAsk?: number | null }) => {
-      onFrame?.(snap.capturedAt, { bestBid: snap.bestBid ?? null, bestAsk: snap.bestAsk ?? null });
+    (payload: { clockAt: number }) => {
+      onFrame?.(payload.clockAt);
     },
     [onFrame]
   );
@@ -230,11 +227,8 @@ export function EventOrderbook({
                 ? (weatherBuckets.find((t) => bucketKey(t) === key && t.side === activeSide) ?? token)
                 : token;
             const q = frameQuotes?.get(displayTok.tokenId);
-            const fromBook =
-              displayTok.tokenId === resolvedId && activeBook
-                ? activeBook
-                : null;
-            const ask = fromBook ? fromBook.bestAsk : q ? q.bestAsk : displayTok.lastAsk;
+            const bid = q ? q.bestBid : displayTok.lastBid ?? null;
+            const ask = q ? q.bestAsk : displayTok.lastAsk ?? null;
             const on =
               token.marketType === "weather"
                 ? Boolean(active && bucketKey(active) === key)
@@ -251,7 +245,11 @@ export function EventOrderbook({
                 <span className="poly-out-name">
                   {token.marketType === "weather" ? token.label : shortLabel(token.label)}
                 </span>
-                <span className="poly-out-price">{cents(ask)}</span>
+                <span className="poly-out-quotes mono">
+                  <span className="poly-out-bid">{cents(bid)}</span>
+                  <span className="poly-out-sep">/</span>
+                  <span className="poly-out-ask">{cents(ask)}</span>
+                </span>
               </button>
             );
           })}
@@ -283,7 +281,7 @@ export function EventOrderbook({
         <OrderbookScrubber
           snapshots={data?.snapshots ?? []}
           outcomeLabel={scrubberLabel}
-          startAtBeginning={false}
+          startAtBeginning={eventFinished}
           matchStart={matchStart}
           matchEnd={matchEnd}
           seekAt={seekAt}

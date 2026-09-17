@@ -163,3 +163,96 @@ export function scoreAtTime<T extends { capturedAt: number; score: string | null
   // Don't invent the first score before it existed — caller can fall back to final.
   return best;
 }
+
+export type GoalEvent = {
+  capturedAt: number;
+  side: "home" | "away";
+  /** Match minute from Gamma `elapsed` when present, e.g. "55". */
+  minute: string | null;
+  period: string | null;
+  homeTotal: number;
+  awayTotal: number;
+};
+
+/**
+ * Approximate goals from score snapshot deltas.
+ * Polymarket does not publish scorers / official minutes — we use the first
+ * tick where the score increases, preferring `elapsed` as the minute.
+ */
+export function inferGoalsFromHistory(
+  rows: Array<{
+    capturedAt: number;
+    score: string | null;
+    period?: string | null;
+    elapsed?: string | null;
+  }>
+): GoalEvent[] {
+  const goals: GoalEvent[] = [];
+  let prevHome = 0;
+  let prevAway = 0;
+  let havePrev = false;
+
+  for (const row of rows) {
+    const parsed = parseScoreString(row.score);
+    if (!parsed || parsed.mode === "sets") continue;
+    const { homeTotal, awayTotal } = parsed;
+    if (!havePrev) {
+      // Opening non-zero score (missed 0-0): count each goal without a minute if needed.
+      if (homeTotal > 0 || awayTotal > 0) {
+        for (let i = 0; i < homeTotal; i++) {
+          goals.push({
+            capturedAt: row.capturedAt,
+            side: "home",
+            minute: i === homeTotal - 1 ? row.elapsed?.trim() || null : null,
+            period: row.period?.trim() || null,
+            homeTotal: i + 1,
+            awayTotal: 0,
+          });
+        }
+        for (let i = 0; i < awayTotal; i++) {
+          goals.push({
+            capturedAt: row.capturedAt,
+            side: "away",
+            minute: i === awayTotal - 1 ? row.elapsed?.trim() || null : null,
+            period: row.period?.trim() || null,
+            homeTotal,
+            awayTotal: i + 1,
+          });
+        }
+      }
+      prevHome = homeTotal;
+      prevAway = awayTotal;
+      havePrev = true;
+      continue;
+    }
+
+    if (homeTotal > prevHome) {
+      for (let i = prevHome; i < homeTotal; i++) {
+        goals.push({
+          capturedAt: row.capturedAt,
+          side: "home",
+          minute: row.elapsed?.trim() || null,
+          period: row.period?.trim() || null,
+          homeTotal: i + 1,
+          awayTotal,
+        });
+      }
+    }
+    if (awayTotal > prevAway) {
+      for (let i = prevAway; i < awayTotal; i++) {
+        goals.push({
+          capturedAt: row.capturedAt,
+          side: "away",
+          minute: row.elapsed?.trim() || null,
+          period: row.period?.trim() || null,
+          homeTotal,
+          awayTotal: i + 1,
+        });
+      }
+    }
+    prevHome = homeTotal;
+    prevAway = awayTotal;
+  }
+
+  return goals;
+}

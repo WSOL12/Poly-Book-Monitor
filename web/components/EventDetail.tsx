@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { EventOrderbook } from "@/components/EventOrderbook";
 import { quoteAtTime } from "@/lib/history";
@@ -24,10 +24,6 @@ type QuotePoint = { capturedAt: number; bestBid: number | null; bestAsk: number 
 export default function EventDetail({ eventId }: { eventId: string }) {
   const [frameAt, setFrameAt] = useState<number | undefined>();
   const [tokenId, setTokenId] = useState("");
-  const [activeBook, setActiveBook] = useState<{
-    bestBid: number | null;
-    bestAsk: number | null;
-  } | null>(null);
 
   const event = useQuery({
     queryKey: ["event", eventId],
@@ -60,6 +56,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
     refetchInterval: () => (event.data && isEventLive(event.data) ? 5_000 : false),
   });
 
+  // One dense series per token — scrubbing updates all market prices locally (no per-tick fetch).
   const quoteSeries = useQuery({
     queryKey: ["event-quote-series", eventId],
     queryFn: async () => {
@@ -71,20 +68,23 @@ export default function EventDetail({ eventId }: { eventId: string }) {
     refetchInterval: () => (event.data && isEventLive(event.data) ? 10_000 : false),
   });
 
-  const onFrame = useCallback((capturedAt: number, book?: { bestBid: number | null; bestAsk: number | null }) => {
+  const onFrame = useCallback((capturedAt: number) => {
     setFrameAt((prev) => (prev === capturedAt ? prev : capturedAt));
-    setActiveBook((prev) => {
-      const next = book ?? null;
-      if (
-        prev?.bestBid === next?.bestBid &&
-        prev?.bestAsk === next?.bestAsk &&
-        (prev == null) === (next == null)
-      ) {
-        return prev;
-      }
-      return next;
-    });
   }, []);
+
+  const data = event.data;
+
+  useEffect(() => {
+    setFrameAt(undefined);
+    setTokenId("");
+  }, [eventId]);
+
+  // Seed from kickoff so sidebar isn't stuck on settled 0.1¢ before scrubber mounts.
+  useEffect(() => {
+    if (frameAt != null) return;
+    const start = data?.startTime ? Date.parse(data.startTime) : NaN;
+    if (Number.isFinite(start)) setFrameAt(start);
+  }, [data?.startTime, frameAt, eventId]);
 
   const quoteById = useMemo(() => {
     const map = new Map<string, { bestBid: number | null; bestAsk: number | null }>();
@@ -92,9 +92,10 @@ export default function EventDetail({ eventId }: { eventId: string }) {
     if (!series) return map;
     const at = frameAt;
     for (const [tokenIdKey, snaps] of Object.entries(series)) {
+      if (!snaps.length) continue;
       if (at == null) {
-        const last = snaps[snaps.length - 1];
-        if (last) map.set(tokenIdKey, { bestBid: last.bestBid, bestAsk: last.bestAsk });
+        const first = snaps[0]!;
+        map.set(tokenIdKey, { bestBid: first.bestBid, bestAsk: first.bestAsk });
         continue;
       }
       map.set(tokenIdKey, quoteAtTime(snaps, at));
@@ -102,7 +103,6 @@ export default function EventDetail({ eventId }: { eventId: string }) {
     return map;
   }, [quoteSeries.data, frameAt]);
 
-  const data = event.data;
   const allTokens = useMemo(
     () =>
       data?.markets.flatMap(
@@ -197,13 +197,9 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                 eventVolume={data.volume}
                 onFrame={onFrame}
                 tokenId={tokenId || defaultTokenId}
-                onTokenChange={(id) => {
-                  setTokenId(id);
-                  setActiveBook(null);
-                }}
+                onTokenChange={setTokenId}
                 frameQuotes={quoteById}
                 seekAt={frameAt}
-                activeBook={activeBook}
                 sport={data.sport}
               />
 
@@ -272,17 +268,15 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                         })
                         .map((token) => {
                         const q = quoteById.get(token.tokenId);
-                        const fromBook =
-                          token.tokenId === (tokenId || defaultTokenId) && activeBook
-                            ? activeBook
-                            : null;
-                        const ask = fromBook ? fromBook.bestAsk : q ? q.bestAsk : token.lastAsk;
+                        const bid = q ? q.bestBid : token.lastBid;
+                        const ask = q ? q.bestAsk : token.lastAsk;
                         const name =
                           market.marketType === "weather"
                             ? token.side === "no"
                               ? "No"
                               : "Yes"
                             : token.label;
+                        const showBidAsk = market.marketType === "total";
                         return (
                           <button
                             key={token.tokenId}
@@ -291,7 +285,15 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                             onClick={() => setTokenId(token.tokenId)}
                           >
                             <span>{name}</span>
-                            <span className="aside-ask mono">{cents(ask)}</span>
+                            {showBidAsk ? (
+                              <span className="aside-quotes mono">
+                                <span className="aside-bid">{cents(bid)}</span>
+                                <span className="aside-quote-sep">/</span>
+                                <span className="aside-ask">{cents(ask)}</span>
+                              </span>
+                            ) : (
+                              <span className="aside-ask mono">{cents(ask ?? bid)}</span>
+                            )}
                           </button>
                         );
                       })}
