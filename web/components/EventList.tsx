@@ -23,6 +23,7 @@ const SPORT_LABEL: Record<string, string> = {
   football: "Football",
   mlb: "MLB",
   weather: "Weather",
+  tennis: "Tennis",
 };
 
 function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
@@ -46,7 +47,7 @@ function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
         </div>
       </div>
       {result ? (
-        <div className="match-result mono" title={event.sport === "weather" ? "Winning temp" : "Score"}>
+        <div className="match-result mono" title={event.sport === "weather" ? "Winning temp" : event.sport === "tennis" ? "Stop reason" : "Score"}>
           {result}
         </div>
       ) : (
@@ -54,7 +55,7 @@ function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
       )}
       <div className="match-side">
         <span className={`match-status${tab === "live" ? " is-live" : ""}`}>
-          {tab === "live" ? (event.sport === "weather" ? "Open" : "Live") : "Finished"}
+          {tab === "live" ? (event.sport === "weather" || event.sport === "tennis" ? "Open" : "Live") : "Finished"}
         </span>
         <span className="match-time mono">
           {tab === "finished" ? finishedWhen(event.finishedAt, event.eventDate) : ago(event.lastSnapshotAt)}

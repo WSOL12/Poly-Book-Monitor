@@ -5,7 +5,7 @@ import { EventList } from "@/components/EventList";
 import { Topbar } from "@/components/Topbar";
 import type { EventRow } from "@/lib/db";
 
-export function Dashboard({ sport }: { sport?: "soccer" | "football" | "mlb" | "weather" }) {
+export function Dashboard({ sport }: { sport?: "soccer" | "football" | "mlb" | "weather" | "tennis" }) {
   const overview = useQuery({
     queryKey: ["overview"],
     queryFn: async () => {

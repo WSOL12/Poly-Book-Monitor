@@ -3,6 +3,8 @@ import {
   eventSchedule,
   parseJsonField,
   isLiveEvent,
+  isItfTennisEvent,
+  isTennisWatchable,
   polyStatusFromEvent,
   type GammaEvent,
   type GammaMarket,
@@ -93,6 +95,20 @@ function splitSides(title: string): [string, string] | null {
   return [parts[0], away];
 }
 
+/** "Geneva Open: Cameron Norrie vs Mariano Navone" → players only. */
+function tennisMatchSides(title: string): [string, string] | null {
+  const m = title.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+  if (!m?.[1] || !m[2]) return null;
+  let home = m[1].trim();
+  const away = m[2]
+    .replace(/\s+[-–]\s+(more markets|set betting|total games).*$/i, "")
+    .trim();
+  const colon = home.lastIndexOf(":");
+  if (colon >= 0) home = home.slice(colon + 1).trim();
+  if (!home || !away) return null;
+  return [home, away];
+}
+
 function mentionsTeam(q: string, team: string) {
   const ql = q.toLowerCase();
   const t = team.toLowerCase().trim();
@@ -177,6 +193,10 @@ function isMatchTitle(title: string, sport: MonitorSport) {
     if (/\b(player props?|first 5|world series champion|al mvp|nl mvp|cy young|outright|win the 20\d\d)\b/i.test(title)) {
       return false;
     }
+  }
+  if (sport === "tennis") {
+    if (/\b(outright|winner|qualify|rankings|to make top|number 1|ballon)\b/i.test(title)) return false;
+    if (/\bitf\b/i.test(title)) return false;
   }
   return true;
 }
@@ -426,7 +446,10 @@ function parseMoneylineFromOutcomes(
 function parseEventMarkets(sport: MonitorSport, event: GammaEvent): MonitoredEvent | null {
   const title = event.title ?? "";
   if (!isMatchTitle(title, sport)) return null;
-  const sides = splitSides(title.replace(/^[a-z0-9]+:\s*/i, ""));
+  const sides =
+    sport === "tennis"
+      ? tennisMatchSides(title)
+      : splitSides(title.replace(/^[a-z0-9]+:\s*/i, ""));
   if (!sides) return null;
   const [home, away] = sides;
   const markets: MonitoredMarket[] = [];
@@ -518,6 +541,22 @@ export function parseLiveSportEvents(sport: MonitorSport, gammaEvents: GammaEven
     if (totals.length) main.markets.push(...totals);
   }
 
+  return [...byKey.values()];
+}
+
+/**
+ * Open (prematch) ATP/WTA tennis — stream until started, canceled, or retired.
+ * ITF is excluded.
+ */
+export function parseOpenTennisEvents(gammaEvents: GammaEvent[]): MonitoredEvent[] {
+  const byKey = new Map<string, MonitoredEvent>();
+  for (const event of gammaEvents) {
+    if (isItfTennisEvent(event)) continue;
+    if (!isTennisWatchable(event)) continue;
+    const parsed = parseEventMarkets("tennis", event);
+    if (!parsed) continue;
+    byKey.set(baseMatchKey(parsed.title), parsed);
+  }
   return [...byKey.values()];
 }
 

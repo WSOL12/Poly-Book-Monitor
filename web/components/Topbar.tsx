@@ -9,6 +9,7 @@ const SPORTS = [
   { id: "soccer", label: "Soccer", href: "/soccer" },
   { id: "football", label: "Football", href: "/football" },
   { id: "mlb", label: "MLB", href: "/mlb" },
+  { id: "tennis", label: "Tennis", href: "/tennis" },
   { id: "weather", label: "Weather", href: "/weather" },
 ] as const;
 
@@ -31,6 +32,7 @@ export function Topbar() {
     pathname.startsWith("/soccer") ? "soccer"
     : pathname.startsWith("/football") ? "football"
     : pathname.startsWith("/mlb") ? "mlb"
+    : pathname.startsWith("/tennis") ? "tennis"
     : pathname.startsWith("/weather") ? "weather"
     : "all";
 

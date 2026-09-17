@@ -136,7 +136,10 @@ export function MatchRail({
                       <span className="match-rail-meta mono">
                         <span className="match-rail-vol">{formatVolume(event.volume)}</span>
                         <span className="match-rail-dot">·</span>
-                        {event.sport !== "weather" && event.period ? `${event.period} · ` : ""}
+                        {event.sport !== "weather" && event.sport !== "tennis" && event.period
+                          ? `${event.period} · `
+                          : ""}
+                        {event.sport === "tennis" && result ? `${result} · ` : ""}
                         {event.sport === "weather" && result ? "win · " : ""}
                         {hint}
                       </span>

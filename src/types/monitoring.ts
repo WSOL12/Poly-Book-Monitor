@@ -1,4 +1,4 @@
-export type MonitorSport = "soccer" | "football" | "mlb" | "weather";
+export type MonitorSport = "soccer" | "football" | "mlb" | "weather" | "tennis";
 
 export type MarketType = "moneyline" | "total" | "weather";
 

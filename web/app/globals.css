@@ -1725,6 +1725,11 @@ tr.row-entered:hover { filter: brightness(1.08); }
   background: rgba(232, 154, 94, 0.14);
 }
 
+.sport-tennis {
+  color: #c8e06a;
+  background: rgba(180, 210, 70, 0.14);
+}
+
 .poly-outcome-btns-wrap {
   max-width: 100%;
   justify-content: flex-start;

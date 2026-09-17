@@ -76,13 +76,20 @@ export function formatScoreLabel(score: string | null | undefined): string | nul
   return `${parsed.homeTotal}–${parsed.awayTotal}`;
 }
 
-/** Sports score, or weather winning temp bucket. */
+/** Sports score, weather winning temp, or tennis stop reason. */
 export function eventResultLabel(event: {
   sport: string;
   score?: string | null;
   winTemp?: string | null;
+  gameStatus?: string | null;
 }): string | null {
   if (event.sport === "weather") return event.winTemp?.trim() || null;
+  if (event.sport === "tennis") {
+    const gs = event.gameStatus?.trim().toLowerCase() ?? "";
+    if (gs === "started") return "STARTED";
+    if (gs === "canceled" || gs === "cancelled") return "CANCELED";
+    if (gs === "retired") return "RETIRED";
+  }
   return formatScoreLabel(event.score);
 }
 

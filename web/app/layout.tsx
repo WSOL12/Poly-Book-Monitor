@@ -18,7 +18,7 @@ const mono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: "Poly Monitor",
-  description: "Polymarket orderbook monitor for soccer, football, and MLB",
+  description: "Polymarket orderbook monitor for soccer, football, MLB, tennis, and weather",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

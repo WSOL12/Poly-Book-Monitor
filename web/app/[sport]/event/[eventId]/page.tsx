@@ -1,7 +1,7 @@
 import EventDetail from "@/components/EventDetail";
 import { redirect } from "next/navigation";
 
-const SPORTS = new Set(["soccer", "football", "mlb", "weather"]);
+const SPORTS = new Set(["soccer", "football", "mlb", "weather", "tennis"]);
 
 export default async function SportEventRoute({
   params,

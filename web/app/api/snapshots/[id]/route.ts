@@ -2,7 +2,7 @@ import { getSnapshotById, type Sport } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-const SPORTS = new Set(["soccer", "football", "mlb", "weather"]);
+const SPORTS = new Set(["soccer", "football", "mlb", "weather", "tennis"]);
 
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;

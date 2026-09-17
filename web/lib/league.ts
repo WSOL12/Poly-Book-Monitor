@@ -49,6 +49,11 @@ const LEAGUE_LABELS: Record<string, string> = {
   ncaaf: "NCAAF",
   kbo: "KBO",
   npb: "NPB",
+  atp: "ATP",
+  wta: "WTA",
+  "atp-doubles": "ATP Doubles",
+  "wta-doubles": "WTA Doubles",
+  tennis: "Tennis",
 };
 
 const SKIP_TAG = new Set([
@@ -59,6 +64,7 @@ const SKIP_TAG = new Set([
   "mlb",
   "baseball",
   "weather",
+  "tennis",
   "crypto",
   "politics",
   "pop-culture",

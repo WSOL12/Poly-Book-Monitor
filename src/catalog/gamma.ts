@@ -34,6 +34,9 @@ export type GammaEvent = {
   period?: string | null;
   elapsed?: string | null;
   finishedTimestamp?: string | null;
+  seriesSlug?: string | null;
+  series?: Array<{ title?: string | null; slug?: string | null }> | null;
+  tags?: Array<{ label?: string | null; slug?: string | null }> | null;
   markets?: GammaMarket[];
 };
 
@@ -51,15 +54,120 @@ export function isFinalPeriod(period?: string | null) {
 }
 
 export function isFinishedGammaEvent(
-  event: Pick<GammaEvent, "ended" | "closed" | "live" | "period">,
+  event: Pick<GammaEvent, "ended" | "closed" | "live" | "period" | "gameStatus" | "score" | "markets">,
   opts?: { sport?: string }
 ) {
   if (event.ended === true || event.closed === true) return true;
   if (isFinalPeriod(event.period)) return true;
   // Weather stays open for the day; Gamma often has live=false the whole time.
   if (opts?.sport === "weather") return false;
+  // Tennis: watch open prematch until started / canceled / retired — live=false is normal.
+  if (opts?.sport === "tennis") {
+    return tennisStopReason(event) != null;
+  }
   if (event.live === false) return true;
   return false;
+}
+
+export type TennisStopReason = "started" | "canceled" | "retired";
+
+function tennisSeriesSlug(event: Pick<GammaEvent, "seriesSlug" | "series">) {
+  return (
+    event.seriesSlug?.trim().toLowerCase() ||
+    event.series?.[0]?.slug?.trim().toLowerCase() ||
+    ""
+  );
+}
+
+/** ITF / low-liquidity futures — skip entirely. */
+export function isItfTennisEvent(
+  event: Pick<GammaEvent, "title" | "slug" | "seriesSlug" | "series" | "tags">
+) {
+  const series = tennisSeriesSlug(event);
+  if (series === "itf") return true;
+  if ((event.tags ?? []).some((t) => /itf/i.test(t.slug ?? "") || /itf/i.test(t.label ?? ""))) {
+    return true;
+  }
+  const title = event.title ?? "";
+  const slug = event.slug ?? "";
+  if (/\bitf\b/i.test(title) || /\bitf\b/i.test(slug)) return true;
+  // W15 / M25 style ITF event names when series is missing or wrong.
+  if (/\b[WM]\d{2}\b/i.test(title) && !/^(atp|wta)/.test(series)) return true;
+  return false;
+}
+
+function moneylineIsFiftyFifty(event: Pick<GammaEvent, "markets">) {
+  for (const market of event.markets ?? []) {
+    if (market.closed) continue;
+    const type = (market.sportsMarketType ?? "").toLowerCase();
+    const names = parseJsonField<string[]>(market.outcomes, []);
+    const prices = parseJsonField<Array<string | number>>(market.outcomePrices, []);
+    if (names.length < 2 || prices.length < 2) continue;
+    const a = Number(prices[0]);
+    const b = Number(prices[1]);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    if (Math.abs(a - 0.5) > 0.02 || Math.abs(b - 0.5) > 0.02) continue;
+    if (
+      type === "moneyline" ||
+      / vs\.? /i.test(market.question ?? "") ||
+      names.some((n) => /^(yes|no)$/i.test(n))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isCanceledTennisStatus(period?: string | null, gameStatus?: string | null) {
+  const p = `${period ?? ""} ${gameStatus ?? ""}`.trim().toUpperCase();
+  if (!p) return false;
+  return (
+    p === "CAN" ||
+    /\bCAN\b/.test(p) ||
+    /CANCEL/.test(p) ||
+    /ABANDON/.test(p) ||
+    /WALKOVER|\bWO\b/.test(p)
+  );
+}
+
+/**
+ * Why we stop watching an open tennis match.
+ * Polymarket voids cancel/retire moneylines at ~50/50 — only trust that when settling.
+ */
+export function tennisStopReason(
+  event: Pick<
+    GammaEvent,
+    "live" | "ended" | "closed" | "period" | "gameStatus" | "score" | "markets"
+  >
+): TennisStopReason | null {
+  if (event.live === true) return "started";
+
+  const blob = `${event.gameStatus ?? ""} ${event.period ?? ""} ${event.score ?? ""}`;
+  if (/retir/i.test(blob)) return "retired";
+  if (isCanceledTennisStatus(event.period, event.gameStatus)) return "canceled";
+
+  const settling =
+    event.ended === true || event.closed === true || isFinalPeriod(event.period);
+  if (settling && moneylineIsFiftyFifty(event)) {
+    const score = (event.score ?? "").replace(/\s+/g, "");
+    // Void with no real score → canceled; partial score + void → retirement.
+    if (!score || score === "0-0" || score === "0-0,0-0") return "canceled";
+    return "retired";
+  }
+
+  if (settling) {
+    // Match completed without catching live=true — still a started match.
+    return "started";
+  }
+  return null;
+}
+
+/** Prematch ATP/WTA (etc.) still worth streaming. */
+export function isTennisWatchable(event: GammaEvent) {
+  if (event.closed || event.ended === true) return false;
+  if (isItfTennisEvent(event)) return false;
+  if (tennisStopReason(event) != null) return false;
+  return true;
 }
 
 export function polyStatusFromEvent(event: GammaEvent) {
@@ -84,10 +192,20 @@ function parseGammaTime(raw?: string | null) {
 export function finishedAtFromGamma(
   event: Pick<
     GammaEvent,
-    "ended" | "closed" | "live" | "period" | "updatedAt" | "endDate" | "finishedTimestamp" | "markets"
-  >
+    | "ended"
+    | "closed"
+    | "live"
+    | "period"
+    | "gameStatus"
+    | "score"
+    | "updatedAt"
+    | "endDate"
+    | "finishedTimestamp"
+    | "markets"
+  >,
+  opts?: { sport?: string }
 ) {
-  if (!isFinishedGammaEvent(event)) return null;
+  if (!isFinishedGammaEvent(event, opts)) return null;
   const finishedTs = parseGammaTime(event.finishedTimestamp);
   if (finishedTs != null) return finishedTs;
   const times: number[] = [];
@@ -249,4 +367,6 @@ export const SPORT_TAGS: Record<MonitorSport, string[]> = {
   football: ["nfl", "ncaa-football", "football"],
   mlb: ["mlb", "baseball", "npb", "kbo"],
   weather: ["highest-temperature"],
+  /** Open ATP/WTA matches; ITF filtered in parsers (seriesSlug / title). */
+  tennis: ["tennis"],
 };

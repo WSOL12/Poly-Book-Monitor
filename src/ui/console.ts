@@ -64,7 +64,7 @@ export function renderConsole(state: ConsoleState, cols: number, maxRows: number
       : "0";
   const catalog = state.refreshing ? "refreshing..." : `${ago(state.catalogAt)} ago`;
 
-  lines.push(`${ESC}[1;36mPOLY MONITOR${ESC}[0m  soccer / football / mlb / weather`);
+  lines.push(`${ESC}[1;36mPOLY MONITOR${ESC}[0m  soccer / football / mlb / weather / tennis`);
   lines.push(
     `process  WSS ${wssState}  |  ${state.events.length} events  |  ${state.tokens.length} tokens  |  up ${uptime}`
   );

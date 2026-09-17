@@ -6,7 +6,11 @@ export async function GET(req: Request) {
   await refreshPolyStatuses();
   const sport = new URL(req.url).searchParams.get("sport");
   const rows = listEvents(
-    sport === "soccer" || sport === "football" || sport === "mlb" || sport === "weather"
+    sport === "soccer" ||
+      sport === "football" ||
+      sport === "mlb" ||
+      sport === "weather" ||
+      sport === "tennis"
       ? (sport as Sport)
       : undefined
   );

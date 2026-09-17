@@ -9,16 +9,22 @@ import {
   fetchOpenEventsByTags,
   finishedAtFromGamma,
   isFinishedGammaEvent,
+  tennisStopReason,
   SPORT_TAGS,
 } from "../catalog/gamma.ts";
-import { allTokens, parseLiveSportEvents, parseWeatherEvents } from "../catalog/parsers.ts";
+import {
+  allTokens,
+  parseLiveSportEvents,
+  parseOpenTennisEvents,
+  parseWeatherEvents,
+} from "../catalog/parsers.ts";
 import { MonitorHub } from "../db/store.ts";
 import { OrderbookStream } from "../stream/orderbookStream.ts";
 import { saveLiveLinks } from "../infra/links.ts";
 import { paintConsole, restoreConsole } from "../ui/console.ts";
 import type { MonitoredEvent, MonitoredToken, MonitorSport } from "../types/monitoring.ts";
 
-const SPORTS: MonitorSport[] = ["soccer", "football", "mlb", "weather"];
+const SPORTS: MonitorSport[] = ["soccer", "football", "mlb", "weather", "tennis"];
 const eventLog: string[] = [];
 
 function pushLog(message: string) {
@@ -72,6 +78,11 @@ export async function main() {
             const gammaEvents = await fetchOpenEventsByTags(SPORT_TAGS.weather);
             return parseWeatherEvents(gammaEvents);
           }
+          if (sport === "tennis") {
+            // Open prematch only — stop when started / canceled / retired (no ITF).
+            const gammaEvents = await fetchOpenEventsByTags(SPORT_TAGS.tennis);
+            return parseOpenTennisEvents(gammaEvents);
+          }
           const gammaEvents = await fetchEventsByTags(SPORT_TAGS[sport]);
           return parseLiveSportEvents(sport, gammaEvents);
         })
@@ -117,7 +128,13 @@ export async function main() {
         if (!prevIds.has(event.eventId)) pushLog(`+ ${event.sport} ${event.title}`);
       }
       for (const event of events) {
-        if (!catalogIds.has(event.eventId)) pushLog(`- ${event.sport} ${event.title}`);
+        if (!catalogIds.has(event.eventId)) {
+          const why =
+            event.sport === "tennis" && event.gameStatus
+              ? ` (${event.gameStatus})`
+              : "";
+          pushLog(`- ${event.sport} ${event.title}${why}`);
+        }
       }
 
       // Only finish events that left the open/live catalog — not weather waiting for 60¢.
@@ -140,14 +157,23 @@ export async function main() {
             gammaRows.map((row) => {
               const id = String(row.id);
               const sport = sportById.get(id);
-              const finished = isFinishedGammaEvent(row, { sport }) || !catalogIds.has(id);
+              const leftCatalog = !catalogIds.has(id);
+              const tennisReason = sport === "tennis" ? tennisStopReason(row) : null;
+              const finished =
+                sport === "tennis"
+                  ? tennisReason != null || leftCatalog || isFinishedGammaEvent(row, { sport })
+                  : isFinishedGammaEvent(row, { sport }) || leftCatalog;
+              const gameStatus =
+                sport === "tennis"
+                  ? tennisReason ?? (leftCatalog ? "started" : row.gameStatus?.trim() || null)
+                  : row.gameStatus?.trim() || row.period?.trim() || null;
               return {
                 eventId: id,
                 ended: finished,
                 polyLive: row.live === true && !finished,
                 closed: row.closed === true,
-                gameStatus: row.gameStatus?.trim() || row.period?.trim() || null,
-                finishedAt: finished ? finishedAtFromGamma(row) : null,
+                gameStatus,
+                finishedAt: finished ? finishedAtFromGamma(row, { sport }) ?? Date.now() : null,
                 score: row.score ?? null,
                 period: row.period ?? null,
                 elapsed: row.elapsed ?? null,
@@ -164,8 +190,9 @@ export async function main() {
       lastCatalogAt = Date.now();
       saveLiveLinks(active);
       stream.sync();
+      const tennisN = active.filter((e) => e.sport === "tennis").length;
       pushLog(
-        `ok ${active.length} live · ${tokens.length} tok · weather wait ${waiting} (<${Math.round(WEATHER_ARM_PRICE * 100)}¢)`
+        `ok ${active.length} live · ${tokens.length} tok · tennis ${tennisN} · weather wait ${waiting} (<${Math.round(WEATHER_ARM_PRICE * 100)}¢)`
       );
     } catch (error) {
       pushLog(`catalog: ${error instanceof Error ? error.message : String(error)}`);

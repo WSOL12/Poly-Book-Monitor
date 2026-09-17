@@ -5,10 +5,14 @@ export function isEventFinished(event: {
   ended?: boolean;
   closed?: boolean;
   gameStatus?: string | null;
+  sport?: string;
 }) {
   if (event.ended || event.closed) return true;
   const p = event.gameStatus?.trim().toUpperCase() ?? "";
-  return p === "VFT" || p === "FT" || p === "FINAL" || p === "F";
+  if (p === "VFT" || p === "FT" || p === "FINAL" || p === "F") return true;
+  // Tennis open-watch terminal labels written by the monitor.
+  if (p === "STARTED" || p === "CANCELED" || p === "CANCELLED" || p === "RETIRED") return true;
+  return false;
 }
 
 export function isEventLive(event: { ended?: boolean; closed?: boolean }) {

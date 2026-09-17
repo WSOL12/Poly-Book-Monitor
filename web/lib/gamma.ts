@@ -30,6 +30,8 @@ export type GammaMarketStatus = {
   slug?: string;
   question?: string;
   sportsMarketType?: string | null;
+  outcomes?: string | string[] | null;
+  outcomePrices?: string | Array<string | number> | null;
   volume?: string | number | null;
   volumeNum?: number | null;
   closed?: boolean;
@@ -70,23 +72,79 @@ export function isFinalPeriod(period?: string | null) {
 }
 
 export function isFinishedGammaEvent(
-  event: Pick<GammaEventStatus, "ended" | "closed" | "live" | "period">,
+  event: Pick<GammaEventStatus, "ended" | "closed" | "live" | "period" | "gameStatus" | "score" | "markets">,
   opts?: { sport?: string }
 ) {
   if (event.ended === true || event.closed === true) return true;
   if (isFinalPeriod(event.period)) return true;
   if (opts?.sport === "weather") return false;
+  if (opts?.sport === "tennis") return tennisStopReason(event) != null;
   if (event.live === false) return true;
   return false;
+}
+
+export type TennisStopReason = "started" | "canceled" | "retired";
+
+function parseJsonField<T>(value: unknown, fallback: T): T {
+  if (value == null) return fallback;
+  if (typeof value !== "string") return value as T;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function moneylineIsFiftyFifty(event: Pick<GammaEventStatus, "markets">) {
+  for (const market of event.markets ?? []) {
+    if (market.closed) continue;
+    const type = (market.sportsMarketType ?? "").toLowerCase();
+    const names = parseJsonField<string[]>(market.outcomes, []);
+    const prices = parseJsonField<Array<string | number>>(market.outcomePrices, []);
+    if (names.length < 2 || prices.length < 2) continue;
+    const a = Number(prices[0]);
+    const b = Number(prices[1]);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    if (Math.abs(a - 0.5) > 0.02 || Math.abs(b - 0.5) > 0.02) continue;
+    if (
+      type === "moneyline" ||
+      / vs\.? /i.test(market.question ?? "") ||
+      names.some((n) => /^(yes|no)$/i.test(n))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Why an open tennis watch stopped — cancel/retire void at ~50/50 on Polymarket. */
+export function tennisStopReason(
+  event: Pick<GammaEventStatus, "live" | "ended" | "closed" | "period" | "gameStatus" | "score" | "markets">
+): TennisStopReason | null {
+  if (event.live === true) return "started";
+  const blob = `${event.gameStatus ?? ""} ${event.period ?? ""} ${event.score ?? ""}`;
+  if (/retir/i.test(blob)) return "retired";
+  const p = blob.toUpperCase();
+  if (/\bCAN\b|CANCEL|ABANDON|WALKOVER|\bWO\b/.test(p)) return "canceled";
+  const settling =
+    event.ended === true || event.closed === true || isFinalPeriod(event.period);
+  if (settling && moneylineIsFiftyFifty(event)) {
+    const score = (event.score ?? "").replace(/\s+/g, "");
+    if (!score || score === "0-0" || score === "0-0,0-0") return "canceled";
+    return "retired";
+  }
+  if (settling) return "started";
+  return null;
 }
 
 export function finishedAtFromGamma(
   event: Pick<
     GammaEventStatus,
     "ended" | "closed" | "live" | "period" | "updatedAt" | "endDate" | "finishedTimestamp" | "markets"
-  >
+  >,
+  opts?: { sport?: string }
 ) {
-  if (!isFinishedGammaEvent(event)) return null;
+  if (!isFinishedGammaEvent(event, opts)) return null;
   const finishedTs = parseGammaTime(event.finishedTimestamp);
   if (finishedTs != null) return finishedTs;
   const times: number[] = [];

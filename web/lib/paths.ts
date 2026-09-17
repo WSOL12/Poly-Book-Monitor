@@ -1,9 +1,9 @@
 import { existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
-export type Sport = "soccer" | "football" | "mlb" | "weather";
+export type Sport = "soccer" | "football" | "mlb" | "weather" | "tennis";
 
-export const SPORTS: Sport[] = ["soccer", "football", "mlb", "weather"];
+export const SPORTS: Sport[] = ["soccer", "football", "mlb", "weather", "tennis"];
 
 export const PROJECT_ROOT = process.env.MONITOR_ROOT
   ? resolve(process.env.MONITOR_ROOT)

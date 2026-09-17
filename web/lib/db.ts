@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
-import { fetchEventsByIds, finishedAtFromGamma, isFinishedGammaEvent, type GammaMarketStatus } from "./gamma";
+import { fetchEventsByIds, finishedAtFromGamma, isFinishedGammaEvent, tennisStopReason, type GammaMarketStatus } from "./gamma";
 import { leagueFromGamma } from "./league";
 import {
   DATA_DIR,
@@ -382,14 +382,21 @@ export async function refreshPolyStatuses() {
         const tx = db.transaction(() => {
           for (const row of gammaRows) {
             const id = String(row.id);
-            const finished = isFinishedGammaEvent(row, { sport });
+            const tennisReason = sport === "tennis" ? tennisStopReason(row) : null;
+            const finished =
+              sport === "tennis"
+                ? tennisReason != null || isFinishedGammaEvent(row, { sport })
+                : isFinishedGammaEvent(row, { sport });
             update.run({
               eventId: id,
               ended: finished ? 1 : 0,
               polyLive: row.live === true && !finished ? 1 : 0,
               closed: row.closed === true ? 1 : 0,
-              gameStatus: row.gameStatus?.trim() || row.period?.trim() || null,
-              finishedAt: finished ? finishedAtFromGamma(row) : null,
+              gameStatus:
+                sport === "tennis"
+                  ? tennisReason ?? (row.gameStatus?.trim() || row.period?.trim() || null)
+                  : row.gameStatus?.trim() || row.period?.trim() || null,
+              finishedAt: finished ? finishedAtFromGamma(row, { sport }) : null,
               league: leagueFromGamma({
                 series: row.series,
                 seriesSlug: row.seriesSlug,

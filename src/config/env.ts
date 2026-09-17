@@ -23,7 +23,7 @@ function loadDotEnv() {
 
 loadDotEnv();
 
-export const SPORTS = ["soccer", "football", "mlb", "weather"] as const;
+export const SPORTS = ["soccer", "football", "mlb", "weather", "tennis"] as const;
 export type EnvSport = (typeof SPORTS)[number];
 
 export const DATA_DIR = process.env.DATA_DIR ?? resolve(process.cwd(), "data");
