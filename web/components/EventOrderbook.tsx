@@ -66,6 +66,7 @@ export function EventOrderbook({
   seekAt,
   activeBook,
   eventVolume,
+  sport,
 }: {
   tokens: TokenOption[];
   eventFinished?: boolean;
@@ -81,6 +82,7 @@ export function EventOrderbook({
   activeBook?: { bestBid: number | null; bestAsk: number | null } | null;
   /** Event-level Polymarket volume fallback when market volume is missing. */
   eventVolume?: number | null;
+  sport?: string;
 }) {
   const [internalId, setInternalId] = useState(tokens[0]?.tokenId ?? "");
   const [tab, setTab] = useState<"book" | "graph">("book");
@@ -286,6 +288,7 @@ export function EventOrderbook({
           matchEnd={matchEnd}
           seekAt={seekAt}
           onFrame={handleFrame}
+          sport={sport}
         />
       )}
     </section>

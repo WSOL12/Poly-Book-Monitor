@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { bestOf, depthSum, normalizeBookSide, parseLevels } from "../db/store.ts";
-import type { MonitorStore } from "../db/store.ts";
+import type { MonitorHub } from "../db/store.ts";
 import type { BookLevel, BookSnapshot, MonitoredToken } from "../types/monitoring.ts";
 import { polyFetch } from "../utils/polyNet.ts";
 
@@ -142,7 +142,7 @@ export class OrderbookStream {
 
   constructor(
     private readonly getTokens: () => MonitoredToken[],
-    private readonly store: MonitorStore,
+    private readonly store: Pick<MonitorHub, "recordSnapshot" | "getTokenMeta">,
     private readonly onEvent?: (message: string) => void
   ) {}
 

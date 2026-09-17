@@ -1,117 +1,150 @@
 import Database from "better-sqlite3";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { DB_PATH } from "../config/env.ts";
+import {
+  DATA_DIR,
+  SPORTS,
+  dbPathForDay,
+  idxPathForSport,
+  sportDir,
+  utcDay,
+} from "../config/env.ts";
 import type { BookLevel, BookSnapshot, MonitoredEvent, MonitoredToken, MonitorSport } from "../types/monitoring.ts";
 
-export function openDb(readonly = false) {
-  mkdirSync(dirname(DB_PATH), { recursive: true });
-  const db = new Database(DB_PATH, { readonly, fileMustExist: readonly });
+export function openDb(path: string, readonly = false) {
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new Database(path, { readonly, fileMustExist: readonly });
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
-  // Keep the WAL from growing without bound (pages ≈ 4KB; 1000 ≈ 4MB between auto-checkpoints).
   db.pragma("wal_autocheckpoint = 1000");
-  // After a successful checkpoint, truncate WAL back under this size (256 MiB).
   db.pragma("journal_size_limit = 268435456");
-  if (!readonly) {
-    db.pragma("busy_timeout = 5000");
-  }
+  if (!readonly) db.pragma("busy_timeout = 5000");
   return db;
 }
 
-/** Flush WAL into the main DB file. TRUNCATE shrinks monitoring.db-wal on disk. */
 export function checkpointDb(db: Database.Database, mode: "PASSIVE" | "TRUNCATE" = "PASSIVE") {
   try {
     db.pragma(`wal_checkpoint(${mode})`);
   } catch {
-    // Readers may block TRUNCATE; PASSIVE is best-effort.
+    /* readers may block TRUNCATE */
   }
 }
 
+export function dayForEvent(event: Pick<MonitoredEvent, "eventDate" | "startTime">): string {
+  if (event.eventDate && /^\d{4}-\d{2}-\d{2}$/.test(event.eventDate)) return event.eventDate;
+  if (event.startTime) {
+    const t = Date.parse(event.startTime);
+    if (Number.isFinite(t)) return utcDay(t);
+  }
+  return utcDay();
+}
+
+export function listDayFiles(sport: MonitorSport): string[] {
+  const dir = sportDir(sport);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => /^\d{4}-\d{2}-\d{2}\.db$/.test(name))
+    .map((name) => name.slice(0, 10))
+    .sort()
+    .reverse();
+}
+
+/**
+ * Compact schema. Layout on disk:
+ *   data/{sport}/{YYYY-MM-DD}.db
+ *   data/{sport}/_idx.db   (event/token → day)
+ */
 export function initSchema(db: Database.Database) {
   db.exec(`
-    CREATE TABLE IF NOT EXISTS events (
-      event_id TEXT PRIMARY KEY,
-      sport TEXT NOT NULL,
-      title TEXT NOT NULL,
-      slug TEXT NOT NULL,
-      start_time TEXT,
-      event_date TEXT,
-      ended INTEGER NOT NULL DEFAULT 0,
-      poly_live INTEGER NOT NULL DEFAULT 0,
-      closed INTEGER NOT NULL DEFAULT 0,
-      game_status TEXT,
-      finished_at INTEGER,
-      updated_at INTEGER NOT NULL
+    CREATE TABLE IF NOT EXISTS ev (
+      id TEXT PRIMARY KEY,
+      t TEXT NOT NULL,
+      s TEXT NOT NULL,
+      st TEXT,
+      d TEXT,
+      e INTEGER NOT NULL DEFAULT 0,
+      l INTEGER NOT NULL DEFAULT 0,
+      c INTEGER NOT NULL DEFAULT 0,
+      gs TEXT,
+      fa INTEGER,
+      ar INTEGER NOT NULL DEFAULT 0,
+      lg TEXT,
+      v REAL,
+      u INTEGER NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS markets (
-      market_id TEXT PRIMARY KEY,
-      event_id TEXT NOT NULL,
-      sport TEXT NOT NULL,
-      market_type TEXT NOT NULL,
-      question TEXT NOT NULL,
-      line TEXT,
-      updated_at INTEGER NOT NULL
+    CREATE TABLE IF NOT EXISTS mk (
+      id TEXT PRIMARY KEY,
+      eid TEXT NOT NULL,
+      mt TEXT NOT NULL,
+      q TEXT NOT NULL,
+      ln TEXT,
+      v REAL,
+      u INTEGER NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS tokens (
-      token_id TEXT PRIMARY KEY,
-      market_id TEXT NOT NULL,
-      event_id TEXT NOT NULL,
-      sport TEXT NOT NULL,
-      market_type TEXT NOT NULL,
-      side TEXT NOT NULL,
-      label TEXT NOT NULL,
-      line TEXT,
-      updated_at INTEGER NOT NULL
+    CREATE TABLE IF NOT EXISTS tk (
+      id TEXT PRIMARY KEY,
+      mid TEXT NOT NULL,
+      eid TEXT NOT NULL,
+      mt TEXT NOT NULL,
+      sd TEXT NOT NULL,
+      lb TEXT NOT NULL,
+      ln TEXT,
+      u INTEGER NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS book_snapshots (
+    CREATE TABLE IF NOT EXISTS ob (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      token_id TEXT NOT NULL,
-      event_id TEXT NOT NULL,
-      sport TEXT NOT NULL,
-      captured_at INTEGER NOT NULL,
-      best_bid REAL,
-      best_ask REAL,
-      bid_depth REAL NOT NULL DEFAULT 0,
-      ask_depth REAL NOT NULL DEFAULT 0,
-      bids_json TEXT NOT NULL DEFAULT '[]',
-      asks_json TEXT NOT NULL DEFAULT '[]',
-      source TEXT NOT NULL DEFAULT 'wss'
+      tid TEXT NOT NULL,
+      eid TEXT NOT NULL,
+      ts INTEGER NOT NULL,
+      bb REAL,
+      ba REAL,
+      bd REAL NOT NULL DEFAULT 0,
+      ad REAL NOT NULL DEFAULT 0,
+      bj TEXT NOT NULL DEFAULT '[]',
+      aj TEXT NOT NULL DEFAULT '[]'
     );
 
-    CREATE INDEX IF NOT EXISTS idx_snapshots_token_time ON book_snapshots(token_id, captured_at);
-    CREATE INDEX IF NOT EXISTS idx_snapshots_event_time ON book_snapshots(event_id, captured_at);
-    CREATE INDEX IF NOT EXISTS idx_snapshots_captured_at ON book_snapshots(captured_at);
-    CREATE INDEX IF NOT EXISTS idx_tokens_event ON tokens(event_id);
-    CREATE INDEX IF NOT EXISTS idx_markets_event ON markets(event_id);
+    CREATE INDEX IF NOT EXISTS idx_ob_tid_ts ON ob(tid, ts);
+    CREATE INDEX IF NOT EXISTS idx_ob_eid_ts ON ob(eid, ts);
 
-    CREATE TABLE IF NOT EXISTS score_snapshots (
+    CREATE TABLE IF NOT EXISTS sc (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_id TEXT NOT NULL,
-      captured_at INTEGER NOT NULL,
-      score TEXT,
-      period TEXT,
-      elapsed TEXT
+      eid TEXT NOT NULL,
+      ts INTEGER NOT NULL,
+      sc TEXT,
+      p TEXT,
+      el TEXT
     );
-    CREATE INDEX IF NOT EXISTS idx_score_event_time ON score_snapshots(event_id, captured_at);
+    CREATE INDEX IF NOT EXISTS idx_sc_eid_ts ON sc(eid, ts);
+
+    CREATE INDEX IF NOT EXISTS idx_tk_eid ON tk(eid);
+    CREATE INDEX IF NOT EXISTS idx_mk_eid ON mk(eid);
   `);
+}
 
-  const eventCols = db.prepare(`PRAGMA table_info(events)`).all() as Array<{ name: string }>;
-  const names = new Set(eventCols.map((c) => c.name));
-  if (!names.has("ended")) db.exec(`ALTER TABLE events ADD COLUMN ended INTEGER NOT NULL DEFAULT 0`);
-  if (!names.has("poly_live")) db.exec(`ALTER TABLE events ADD COLUMN poly_live INTEGER NOT NULL DEFAULT 0`);
-  if (!names.has("closed")) db.exec(`ALTER TABLE events ADD COLUMN closed INTEGER NOT NULL DEFAULT 0`);
-  if (!names.has("game_status")) db.exec(`ALTER TABLE events ADD COLUMN game_status TEXT`);
-  if (!names.has("finished_at")) db.exec(`ALTER TABLE events ADD COLUMN finished_at INTEGER`);
-  if (!names.has("armed")) db.exec(`ALTER TABLE events ADD COLUMN armed INTEGER NOT NULL DEFAULT 0`);
-  if (!names.has("league")) db.exec(`ALTER TABLE events ADD COLUMN league TEXT`);
-  if (!names.has("volume")) db.exec(`ALTER TABLE events ADD COLUMN volume REAL`);
-  const marketCols = db.prepare(`PRAGMA table_info(markets)`).all() as Array<{ name: string }>;
-  const marketNames = new Set(marketCols.map((c) => c.name));
-  if (!marketNames.has("volume")) db.exec(`ALTER TABLE markets ADD COLUMN volume REAL`);
+/** Compact level JSON: [{p,s},…] */
+export function levelsToJson(levels: BookLevel[]) {
+  return JSON.stringify(levels.map((l) => ({ p: l.price, s: l.size })));
+}
+
+export function levelsFromJson(raw: string): BookLevel[] {
+  try {
+    const arr = JSON.parse(raw) as Array<{ p?: number; s?: number; price?: number; size?: number }>;
+    if (!Array.isArray(arr)) return [];
+    const out: BookLevel[] = [];
+    for (const row of arr) {
+      const price = Number(row.p ?? row.price);
+      const size = Number(row.s ?? row.size);
+      if (!Number.isFinite(price) || !Number.isFinite(size) || size <= 0) continue;
+      out.push({ price, size });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 export type PolyEventStatus = {
@@ -135,122 +168,113 @@ export class MonitorStore {
   private readonly lastScore;
   private readonly insertScore;
 
-  constructor(private readonly db: Database.Database) {
+  constructor(
+    private readonly db: Database.Database,
+    readonly sport: MonitorSport,
+    readonly day: string
+  ) {
     initSchema(db);
     this.upsertEvent = db.prepare(`
-      INSERT INTO events (
-        event_id, sport, title, slug, start_time, event_date,
-        ended, poly_live, closed, game_status, finished_at, updated_at
-      )
-      VALUES (
-        @eventId, @sport, @title, @slug, @startTime, @eventDate,
-        @ended, @polyLive, @closed, @gameStatus, @finishedAt, @updatedAt
-      )
-      ON CONFLICT(event_id) DO UPDATE SET
-        sport = excluded.sport,
-        title = excluded.title,
-        slug = excluded.slug,
-        start_time = excluded.start_time,
-        event_date = excluded.event_date,
-        ended = CASE WHEN events.ended = 1 OR events.closed = 1 THEN 1 ELSE excluded.ended END,
-        poly_live = CASE WHEN events.ended = 1 OR events.closed = 1 OR excluded.ended = 1 THEN 0 ELSE excluded.poly_live END,
-        closed = CASE WHEN events.closed = 1 THEN 1 ELSE excluded.closed END,
-        game_status = COALESCE(excluded.game_status, events.game_status),
-        finished_at = COALESCE(events.finished_at, excluded.finished_at),
-        updated_at = excluded.updated_at
+      INSERT INTO ev (id, t, s, st, d, e, l, c, gs, fa, u)
+      VALUES (@id, @t, @s, @st, @d, @e, @l, @c, @gs, @fa, @u)
+      ON CONFLICT(id) DO UPDATE SET
+        t = excluded.t,
+        s = excluded.s,
+        st = excluded.st,
+        d = excluded.d,
+        e = CASE WHEN ev.e = 1 OR ev.c = 1 THEN 1 ELSE excluded.e END,
+        l = CASE WHEN ev.e = 1 OR ev.c = 1 OR excluded.e = 1 THEN 0 ELSE excluded.l END,
+        c = CASE WHEN ev.c = 1 THEN 1 ELSE excluded.c END,
+        gs = COALESCE(excluded.gs, ev.gs),
+        fa = COALESCE(ev.fa, excluded.fa),
+        u = excluded.u
     `);
     this.upsertMarket = db.prepare(`
-      INSERT INTO markets (market_id, event_id, sport, market_type, question, line, updated_at)
-      VALUES (@marketId, @eventId, @sport, @marketType, @question, @line, @updatedAt)
-      ON CONFLICT(market_id) DO UPDATE SET
-        question = excluded.question,
-        line = excluded.line,
-        updated_at = excluded.updated_at
+      INSERT INTO mk (id, eid, mt, q, ln, u)
+      VALUES (@id, @eid, @mt, @q, @ln, @u)
+      ON CONFLICT(id) DO UPDATE SET
+        q = excluded.q,
+        ln = excluded.ln,
+        u = excluded.u
     `);
     this.upsertToken = db.prepare(`
-      INSERT INTO tokens (token_id, market_id, event_id, sport, market_type, side, label, line, updated_at)
-      VALUES (@tokenId, @marketId, @eventId, @sport, @marketType, @side, @label, @line, @updatedAt)
-      ON CONFLICT(token_id) DO UPDATE SET
-        market_id = excluded.market_id,
-        event_id = excluded.event_id,
-        sport = excluded.sport,
-        market_type = excluded.market_type,
-        side = excluded.side,
-        label = excluded.label,
-        line = excluded.line,
-        updated_at = excluded.updated_at
+      INSERT INTO tk (id, mid, eid, mt, sd, lb, ln, u)
+      VALUES (@id, @mid, @eid, @mt, @sd, @lb, @ln, @u)
+      ON CONFLICT(id) DO UPDATE SET
+        mid = excluded.mid,
+        eid = excluded.eid,
+        mt = excluded.mt,
+        sd = excluded.sd,
+        lb = excluded.lb,
+        ln = excluded.ln,
+        u = excluded.u
     `);
     this.insertSnapshot = db.prepare(`
-      INSERT INTO book_snapshots (
-        token_id, event_id, sport, captured_at, best_bid, best_ask,
-        bid_depth, ask_depth, bids_json, asks_json, source
-      ) VALUES (
-        @tokenId, @eventId, @sport, @capturedAt, @bestBid, @bestAsk,
-        @bidDepth, @askDepth, @bidsJson, @asksJson, @source
-      )
+      INSERT INTO ob (tid, eid, ts, bb, ba, bd, ad, bj, aj)
+      VALUES (@tid, @eid, @ts, @bb, @ba, @bd, @ad, @bj, @aj)
     `);
     this.updatePolyStatus = db.prepare(`
-      UPDATE events
-      SET ended = @ended,
-          poly_live = @polyLive,
-          closed = @closed,
-          game_status = @gameStatus,
-          finished_at = CASE
-            WHEN @ended = 1 OR @closed = 1 THEN COALESCE(@finishedAt, finished_at)
-            ELSE finished_at
+      UPDATE ev
+      SET e = @e,
+          l = @l,
+          c = @c,
+          gs = @gs,
+          fa = CASE
+            WHEN @e = 1 OR @c = 1 THEN COALESCE(@fa, fa)
+            ELSE fa
           END,
-          updated_at = @updatedAt
-      WHERE event_id = @eventId
+          u = @u
+      WHERE id = @id
     `);
     this.lastScore = db.prepare(`
-      SELECT score, period, elapsed FROM score_snapshots
-      WHERE event_id = @eventId ORDER BY captured_at DESC LIMIT 1
+      SELECT sc, p, el FROM sc WHERE eid = @eid ORDER BY ts DESC LIMIT 1
     `);
     this.insertScore = db.prepare(`
-      INSERT INTO score_snapshots (event_id, captured_at, score, period, elapsed)
-      VALUES (@eventId, @capturedAt, @score, @period, @elapsed)
+      INSERT INTO sc (eid, ts, sc, p, el) VALUES (@eid, @ts, @sc, @p, @el)
     `);
+  }
+
+  get raw() {
+    return this.db;
   }
 
   syncCatalog(events: MonitoredEvent[]) {
     const now = Date.now();
     const tx = this.db.transaction(() => {
       for (const event of events) {
+        if (event.sport !== this.sport) continue;
         this.upsertEvent.run({
-          eventId: event.eventId,
-          sport: event.sport,
-          title: event.title,
-          slug: event.slug,
-          startTime: event.startTime,
-          eventDate: event.eventDate,
-          ended: event.ended ? 1 : 0,
-          polyLive: event.polyLive ? 1 : 0,
-          closed: event.closed ? 1 : 0,
-          gameStatus: event.gameStatus,
-          finishedAt: event.finishedAt,
-          updatedAt: now,
+          id: event.eventId,
+          t: event.title,
+          s: event.slug,
+          st: event.startTime,
+          d: event.eventDate,
+          e: event.ended ? 1 : 0,
+          l: event.polyLive ? 1 : 0,
+          c: event.closed ? 1 : 0,
+          gs: event.gameStatus,
+          fa: event.finishedAt,
+          u: now,
         });
         for (const market of event.markets) {
           this.upsertMarket.run({
-            marketId: market.marketId,
-            eventId: event.eventId,
-            sport: market.sport,
-            marketType: market.marketType,
-            question: market.question,
-            line: market.line,
-            updatedAt: now,
+            id: market.marketId,
+            eid: market.eventId,
+            mt: market.marketType,
+            q: market.question,
+            ln: market.line,
+            u: now,
           });
           for (const row of market.tokens) {
             this.upsertToken.run({
-              tokenId: row.tokenId,
-              marketId: row.marketId,
-              eventId: row.eventId,
-              sport: row.sport,
-              marketType: row.marketType,
-              side: row.side,
-              label: row.label,
-              line: row.line,
-              updatedAt: now,
+              id: row.tokenId,
+              mid: row.marketId,
+              eid: row.eventId,
+              mt: row.marketType,
+              sd: row.side,
+              lb: row.label,
+              ln: row.line,
+              u: now,
             });
           }
         }
@@ -260,53 +284,32 @@ export class MonitorStore {
   }
 
   listEventIds() {
-    return (this.db.prepare(`SELECT event_id AS eventId FROM events`).all() as Array<{ eventId: string }>).map(
-      (row) => row.eventId
-    );
-  }
-
-  getEventSport(eventId: string): MonitorSport | null {
-    const row = this.db.prepare(`SELECT sport FROM events WHERE event_id = ?`).get(eventId) as
-      | { sport: MonitorSport }
-      | undefined;
-    return row?.sport ?? null;
+    return (this.db.prepare(`SELECT id FROM ev`).all() as Array<{ id: string }>).map((r) => r.id);
   }
 
   isArmed(eventId: string) {
-    const row = this.db.prepare(`SELECT armed FROM events WHERE event_id = ?`).get(eventId) as
-      | { armed: number }
-      | undefined;
-    return row?.armed === 1;
+    const row = this.db.prepare(`SELECT ar FROM ev WHERE id = ?`).get(eventId) as { ar: number } | undefined;
+    return row?.ar === 1;
   }
 
   armEvent(eventId: string) {
-    this.db
-      .prepare(`UPDATE events SET armed = 1, updated_at = ? WHERE event_id = ? AND armed = 0`)
-      .run(Date.now(), eventId);
+    this.db.prepare(`UPDATE ev SET ar = 1, u = ? WHERE id = ? AND ar = 0`).run(Date.now(), eventId);
   }
 
   listArmedEventIds() {
-    return (
-      this.db.prepare(`SELECT event_id AS eventId FROM events WHERE armed = 1`).all() as Array<{ eventId: string }>
-    ).map((row) => row.eventId);
+    return (this.db.prepare(`SELECT id FROM ev WHERE ar = 1`).all() as Array<{ id: string }>).map((r) => r.id);
   }
 
-  /**
-   * Sticky-arm weather we already recorded. The 60¢ gate must not unsubscribe
-   * a market mid-flight just because the favorite later dipped below 60¢, or
-   * because `armed` defaulted to 0 after a schema/code change.
-   */
   armWeatherThatAlreadyHasBooks() {
-    const ids = this.db
-      .prepare(`SELECT event_id AS eventId FROM events WHERE sport = 'weather' AND armed = 0`)
-      .all() as Array<{ eventId: string }>;
+    if (this.sport !== "weather") return 0;
+    const ids = this.db.prepare(`SELECT id FROM ev WHERE ar = 0`).all() as Array<{ id: string }>;
     if (!ids.length) return 0;
-    const hasBook = this.db.prepare(`SELECT 1 AS ok FROM book_snapshots WHERE event_id = ? LIMIT 1`);
+    const hasBook = this.db.prepare(`SELECT 1 AS ok FROM ob WHERE eid = ? LIMIT 1`);
     let n = 0;
     const tx = this.db.transaction(() => {
-      for (const { eventId } of ids) {
-        if (!hasBook.get(eventId)) continue;
-        this.armEvent(eventId);
+      for (const { id } of ids) {
+        if (!hasBook.get(id)) continue;
+        this.armEvent(id);
         n++;
       }
     });
@@ -314,22 +317,16 @@ export class MonitorStore {
     return n;
   }
 
-  /** Mark events that left the live catalog as finished so UI/recording stop. */
   markEventsFinished(eventIds: string[], finishedAt = Date.now()) {
     if (!eventIds.length) return;
     const stmt = this.db.prepare(`
-      UPDATE events
-      SET ended = 1,
-          poly_live = 0,
-          finished_at = COALESCE(finished_at, @finishedAt),
-          updated_at = @updatedAt
-      WHERE event_id = @eventId AND ended = 0 AND closed = 0
+      UPDATE ev
+      SET e = 1, l = 0, fa = COALESCE(fa, @fa), u = @u
+      WHERE id = @id AND e = 0 AND c = 0
     `);
     const now = Date.now();
     const tx = this.db.transaction(() => {
-      for (const eventId of eventIds) {
-        stmt.run({ eventId, finishedAt, updatedAt: now });
-      }
+      for (const id of eventIds) stmt.run({ id, fa: finishedAt, u: now });
     });
     tx();
   }
@@ -340,23 +337,23 @@ export class MonitorStore {
       for (const row of rows) {
         const finished = row.ended || row.closed;
         this.updatePolyStatus.run({
-          eventId: row.eventId,
-          ended: row.ended ? 1 : 0,
-          polyLive: row.polyLive ? 1 : 0,
-          closed: row.closed ? 1 : 0,
-          gameStatus: row.gameStatus,
-          finishedAt: finished ? row.finishedAt : null,
-          updatedAt: now,
+          id: row.eventId,
+          e: row.ended ? 1 : 0,
+          l: row.polyLive ? 1 : 0,
+          c: row.closed ? 1 : 0,
+          gs: row.gameStatus,
+          fa: finished ? row.finishedAt : null,
+          u: now,
         });
         const score = row.score?.trim() || null;
         const period = row.period?.trim() || null;
         const elapsed = row.elapsed?.trim() || null;
         if (!score && !period && !elapsed) continue;
-        const prev = this.lastScore.get({ eventId: row.eventId }) as
-          | { score: string | null; period: string | null; elapsed: string | null }
+        const prev = this.lastScore.get({ eid: row.eventId }) as
+          | { sc: string | null; p: string | null; el: string | null }
           | undefined;
-        if (prev && prev.score === score && prev.period === period && prev.elapsed === elapsed) continue;
-        this.insertScore.run({ eventId: row.eventId, capturedAt: now, score, period, elapsed });
+        if (prev && prev.sc === score && prev.p === period && prev.el === elapsed) continue;
+        this.insertScore.run({ eid: row.eventId, ts: now, sc: score, p: period, el: elapsed });
       }
     });
     tx();
@@ -364,36 +361,248 @@ export class MonitorStore {
 
   recordSnapshot(snap: BookSnapshot) {
     this.insertSnapshot.run({
-      tokenId: snap.tokenId,
-      eventId: snap.eventId,
-      sport: snap.sport,
-      capturedAt: snap.capturedAt,
-      bestBid: snap.bestBid,
-      bestAsk: snap.bestAsk,
-      bidDepth: snap.bidDepth,
-      askDepth: snap.askDepth,
-      bidsJson: JSON.stringify(snap.bids),
-      asksJson: JSON.stringify(snap.asks),
-      source: snap.source,
+      tid: snap.tokenId,
+      eid: snap.eventId,
+      ts: snap.capturedAt,
+      bb: snap.bestBid,
+      ba: snap.bestAsk,
+      bd: snap.bidDepth,
+      ad: snap.askDepth,
+      bj: levelsToJson(snap.bids),
+      aj: levelsToJson(snap.asks),
     });
   }
 
   getTokenMeta(tokenId: string): MonitoredToken | null {
     const row = this.db
       .prepare(
-        `SELECT token_id AS tokenId, market_id AS marketId, event_id AS eventId, sport,
-                market_type AS marketType, side, label, line
-         FROM tokens WHERE token_id = ?`
+        `SELECT id AS tokenId, mid AS marketId, eid AS eventId, mt AS marketType, sd AS side, lb AS label, ln AS line
+         FROM tk WHERE id = ?`
       )
-      .get(tokenId) as MonitoredToken | undefined;
-    return row ?? null;
+      .get(tokenId) as
+      | {
+          tokenId: string;
+          marketId: string;
+          eventId: string;
+          marketType: MonitoredToken["marketType"];
+          side: string;
+          label: string;
+          line: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return { ...row, sport: this.sport };
   }
 
   stats() {
-    const events = (this.db.prepare(`SELECT COUNT(*) AS n FROM events`).get() as { n: number }).n;
-    const tokens = (this.db.prepare(`SELECT COUNT(*) AS n FROM tokens`).get() as { n: number }).n;
-    const snapshots = (this.db.prepare(`SELECT COUNT(*) AS n FROM book_snapshots`).get() as { n: number }).n;
+    const events = (this.db.prepare(`SELECT COUNT(*) AS n FROM ev`).get() as { n: number }).n;
+    const tokens = (this.db.prepare(`SELECT COUNT(*) AS n FROM tk`).get() as { n: number }).n;
+    const snapshots = (this.db.prepare(`SELECT COUNT(*) AS n FROM ob`).get() as { n: number }).n;
     return { events, tokens, snapshots };
+  }
+}
+
+/** Routes catalog/snapshots across data/{sport}/{day}.db files. */
+export class MonitorHub {
+  private readonly cache = new Map<string, MonitorStore>();
+  private readonly eventLoc = new Map<string, { sport: MonitorSport; day: string }>();
+  private readonly tokenLoc = new Map<string, { sport: MonitorSport; day: string }>();
+  private readonly idx = new Map<MonitorSport, Database.Database>();
+
+  constructor() {
+    mkdirSync(DATA_DIR, { recursive: true });
+    for (const sport of SPORTS) {
+      mkdirSync(sportDir(sport), { recursive: true });
+      const idxDb = openDb(idxPathForSport(sport));
+      idxDb.exec(`
+        CREATE TABLE IF NOT EXISTS loc (
+          eid TEXT PRIMARY KEY,
+          day TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS tok (
+          tid TEXT PRIMARY KEY,
+          eid TEXT NOT NULL,
+          day TEXT NOT NULL
+        );
+      `);
+      this.idx.set(sport, idxDb);
+      // Warm location maps from index.
+      for (const row of idxDb.prepare(`SELECT eid, day FROM loc`).all() as Array<{ eid: string; day: string }>) {
+        this.eventLoc.set(row.eid, { sport, day: row.day });
+      }
+      for (const row of idxDb.prepare(`SELECT tid, eid, day FROM tok`).all() as Array<{
+        tid: string;
+        eid: string;
+        day: string;
+      }>) {
+        this.tokenLoc.set(row.tid, { sport, day: row.day });
+      }
+    }
+  }
+
+  private key(sport: MonitorSport, day: string) {
+    return `${sport}/${day}`;
+  }
+
+  store(sport: MonitorSport, day: string) {
+    const k = this.key(sport, day);
+    let s = this.cache.get(k);
+    if (!s) {
+      s = new MonitorStore(openDb(dbPathForDay(sport, day)), sport, day);
+      this.cache.set(k, s);
+    }
+    return s;
+  }
+
+  private remember(event: MonitoredEvent, day: string) {
+    const sport = event.sport;
+    this.eventLoc.set(event.eventId, { sport, day });
+    const idx = this.idx.get(sport)!;
+    idx.prepare(`INSERT INTO loc (eid, day) VALUES (?, ?) ON CONFLICT(eid) DO UPDATE SET day = excluded.day`).run(
+      event.eventId,
+      day
+    );
+    const upsertTok = idx.prepare(
+      `INSERT INTO tok (tid, eid, day) VALUES (?, ?, ?) ON CONFLICT(tid) DO UPDATE SET eid = excluded.eid, day = excluded.day`
+    );
+    for (const market of event.markets) {
+      for (const token of market.tokens) {
+        this.tokenLoc.set(token.tokenId, { sport, day });
+        upsertTok.run(token.tokenId, event.eventId, day);
+      }
+    }
+  }
+
+  syncCatalog(events: MonitoredEvent[]) {
+    const groups = new Map<string, MonitoredEvent[]>();
+    for (const event of events) {
+      const day = dayForEvent(event);
+      const k = this.key(event.sport, day);
+      const list = groups.get(k) ?? [];
+      list.push(event);
+      groups.set(k, list);
+      this.remember(event, day);
+    }
+    for (const [k, list] of groups) {
+      const [sport, day] = k.split("/") as [MonitorSport, string];
+      this.store(sport, day).syncCatalog(list);
+    }
+  }
+
+  listEventIds() {
+    return [...this.eventLoc.keys()];
+  }
+
+  getEventSport(eventId: string): MonitorSport | null {
+    return this.eventLoc.get(eventId)?.sport ?? null;
+  }
+
+  getEventLoc(eventId: string) {
+    return this.eventLoc.get(eventId) ?? null;
+  }
+
+  listArmedEventIds() {
+    const out = new Set<string>();
+    for (const day of listDayFiles("weather")) {
+      for (const id of this.store("weather", day).listArmedEventIds()) out.add(id);
+    }
+    return [...out];
+  }
+
+  armEvent(eventId: string) {
+    const loc = this.eventLoc.get(eventId);
+    if (!loc || loc.sport !== "weather") return;
+    this.store(loc.sport, loc.day).armEvent(eventId);
+  }
+
+  armWeatherThatAlreadyHasBooks() {
+    let n = 0;
+    for (const day of listDayFiles("weather")) {
+      n += this.store("weather", day).armWeatherThatAlreadyHasBooks();
+    }
+    return n;
+  }
+
+  markEventsFinished(eventIds: string[], finishedAt = Date.now()) {
+    if (!eventIds.length) return;
+    const by = new Map<string, string[]>();
+    for (const id of eventIds) {
+      const loc = this.eventLoc.get(id);
+      if (!loc) continue;
+      const k = this.key(loc.sport, loc.day);
+      const list = by.get(k) ?? [];
+      list.push(id);
+      by.set(k, list);
+    }
+    for (const [k, ids] of by) {
+      const [sport, day] = k.split("/") as [MonitorSport, string];
+      this.store(sport, day).markEventsFinished(ids, finishedAt);
+    }
+  }
+
+  updatePolyStatuses(rows: PolyEventStatus[]) {
+    const by = new Map<string, PolyEventStatus[]>();
+    for (const row of rows) {
+      const loc = this.eventLoc.get(row.eventId);
+      if (!loc) continue;
+      const k = this.key(loc.sport, loc.day);
+      const list = by.get(k) ?? [];
+      list.push(row);
+      by.set(k, list);
+    }
+    for (const [k, list] of by) {
+      const [sport, day] = k.split("/") as [MonitorSport, string];
+      this.store(sport, day).updatePolyStatuses(list);
+    }
+  }
+
+  recordSnapshot(snap: BookSnapshot) {
+    const loc =
+      this.tokenLoc.get(snap.tokenId) ??
+      this.eventLoc.get(snap.eventId) ??
+      { sport: snap.sport, day: utcDay(snap.capturedAt) };
+    this.store(loc.sport, loc.day).recordSnapshot(snap);
+  }
+
+  getTokenMeta(tokenId: string): MonitoredToken | null {
+    const loc = this.tokenLoc.get(tokenId);
+    if (loc) return this.store(loc.sport, loc.day).getTokenMeta(tokenId);
+    for (const sport of SPORTS) {
+      const row = this.idx.get(sport)!.prepare(`SELECT day FROM tok WHERE tid = ?`).get(tokenId) as
+        | { day: string }
+        | undefined;
+      if (!row) continue;
+      this.tokenLoc.set(tokenId, { sport, day: row.day });
+      return this.store(sport, row.day).getTokenMeta(tokenId);
+    }
+    return null;
+  }
+
+  stats() {
+    let events = 0;
+    let tokens = 0;
+    let snapshots = 0;
+    for (const sport of SPORTS) {
+      for (const day of listDayFiles(sport)) {
+        const s = this.store(sport, day).stats();
+        events += s.events;
+        tokens += s.tokens;
+        snapshots += s.snapshots;
+      }
+    }
+    return { events, tokens, snapshots };
+  }
+
+  checkpointAll(mode: "PASSIVE" | "TRUNCATE" = "PASSIVE") {
+    for (const store of this.cache.values()) checkpointDb(store.raw, mode);
+    for (const idx of this.idx.values()) checkpointDb(idx, mode);
+  }
+
+  close() {
+    for (const store of this.cache.values()) store.raw.close();
+    this.cache.clear();
+    for (const idx of this.idx.values()) idx.close();
+    this.idx.clear();
   }
 }
 
@@ -420,7 +629,6 @@ export function depthSum(levels: BookLevel[]) {
   return levels.reduce((sum, level) => sum + level.size, 0);
 }
 
-/** Store full book: bids best-first, asks best-first. */
 export function normalizeBookSide(levels: BookLevel[], side: "bid" | "ask") {
   return [...levels].sort((a, b) => (side === "bid" ? b.price - a.price : a.price - b.price));
 }

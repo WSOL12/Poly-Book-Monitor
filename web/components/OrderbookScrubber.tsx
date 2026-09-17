@@ -120,6 +120,7 @@ export function OrderbookScrubber({
   /** Preserve scrub position across market switches on the same match. */
   seekAt,
   onFrame,
+  sport,
 }: {
   snapshots: SnapshotRow[];
   outcomeLabel?: string;
@@ -128,6 +129,8 @@ export function OrderbookScrubber({
   matchEnd?: number | null;
   seekAt?: number;
   onFrame?: (snap: SnapshotRow, idx: number) => void;
+  /** Required for per-sport DB lookup of full book frames. */
+  sport?: string;
 }) {
   const frames = useMemo(
     () => cropScrubWindow(snapshots, matchStart, matchEnd),
@@ -174,9 +177,13 @@ export function OrderbookScrubber({
   };
 
   const bookQuery = useQuery({
-    queryKey: ["snapshot-book", snap?.id],
+    queryKey: ["snapshot-book", sport, snap?.day, snap?.id],
     queryFn: async () => {
-      const res = await fetch(`/api/snapshots/${snap!.id}`);
+      const params = new URLSearchParams();
+      if (sport) params.set("sport", sport);
+      if (snap!.day) params.set("day", snap!.day);
+      const q = params.size ? `?${params}` : "";
+      const res = await fetch(`/api/snapshots/${snap!.id}${q}`);
       if (!res.ok) throw new Error("snapshot unavailable");
       return res.json() as Promise<SnapshotRow>;
     },
@@ -219,17 +226,22 @@ export function OrderbookScrubber({
     for (const j of [safeIdx - 1, safeIdx + 1, safeIdx - 2, safeIdx + 2]) {
       if (j < 0 || j >= frames.length) continue;
       const id = frames[j]!.id;
+      const day = frames[j]!.day;
       void queryClient.prefetchQuery({
-        queryKey: ["snapshot-book", id],
+        queryKey: ["snapshot-book", sport, day, id],
         queryFn: async () => {
-          const res = await fetch(`/api/snapshots/${id}`);
+          const params = new URLSearchParams();
+          if (sport) params.set("sport", sport);
+          if (day) params.set("day", day);
+          const q = params.size ? `?${params}` : "";
+          const res = await fetch(`/api/snapshots/${id}${q}`);
           if (!res.ok) throw new Error("snapshot unavailable");
           return res.json() as Promise<SnapshotRow>;
         },
         staleTime: Infinity,
       });
     }
-  }, [safeIdx, frames, queryClient]);
+  }, [safeIdx, frames, queryClient, sport]);
 
   useEffect(() => {
     if (!playing || frames.length < 2) return;

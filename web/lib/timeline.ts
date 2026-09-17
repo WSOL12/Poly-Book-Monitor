@@ -5,6 +5,8 @@ export type HistoryTimeline = {
   at: number[];
   bestBid: Array<number | null>;
   bestAsk: Array<number | null>;
+  /** Per-row day shard (YYYY-MM-DD), required for per-day DB lookup. */
+  day?: string[];
 };
 
 export function expandTimeline(timeline: HistoryTimeline | undefined | null): SnapshotRow[] {
@@ -20,6 +22,7 @@ export function expandTimeline(timeline: HistoryTimeline | undefined | null): Sn
       askDepth: 0,
       bids: [],
       asks: [],
+      day: timeline.day?.[i],
     };
   }
   return out;

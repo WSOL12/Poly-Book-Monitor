@@ -204,6 +204,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                 frameQuotes={quoteById}
                 seekAt={frameAt}
                 activeBook={activeBook}
+                sport={data.sport}
               />
 
               <div className="event-meta mono">

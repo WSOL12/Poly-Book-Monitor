@@ -64,6 +64,7 @@ export default function TokenDetail({ tokenId }: { tokenId: string }) {
               snapshots={data.snapshots}
               outcomeLabel={data.token.label}
               startAtBeginning={data.eventFinished}
+              sport={data.token.sport}
             />
           </section>
         </>

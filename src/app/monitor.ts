@@ -12,7 +12,7 @@ import {
   SPORT_TAGS,
 } from "../catalog/gamma.ts";
 import { allTokens, parseLiveSportEvents, parseWeatherEvents } from "../catalog/parsers.ts";
-import { MonitorStore, checkpointDb, openDb } from "../db/store.ts";
+import { MonitorHub } from "../db/store.ts";
 import { OrderbookStream } from "../stream/orderbookStream.ts";
 import { saveLiveLinks } from "../infra/links.ts";
 import { paintConsole, restoreConsole } from "../ui/console.ts";
@@ -34,9 +34,8 @@ function weatherReady(event: MonitoredEvent, armed: Set<string>) {
 }
 
 export async function main() {
-  const db = openDb();
-  const store = new MonitorStore(db);
-  const recovered = store.armWeatherThatAlreadyHasBooks();
+  const hub = new MonitorHub();
+  const recovered = hub.armWeatherThatAlreadyHasBooks();
   if (recovered) pushLog(`re-arm ${recovered} weather already on disk`);
   const startedAt = Date.now();
   let events: MonitoredEvent[] = [];
@@ -45,10 +44,10 @@ export async function main() {
   let refreshing = false;
   let lastCatalogAt = 0;
 
-  const stream = new OrderbookStream(() => tokens, store, pushLog);
+  const stream = new OrderbookStream(() => tokens, hub, pushLog);
 
   const paint = () => {
-    const stats = store.stats();
+    const stats = hub.stats();
     paintConsole({
       events,
       tokens,
@@ -86,9 +85,9 @@ export async function main() {
       const prevIds = new Set(events.map((e) => e.eventId));
 
       // Keep full open catalog in DB; arm weather that crossed the price gate.
-      store.syncCatalog(catalog);
+      hub.syncCatalog(catalog);
 
-      const armed = new Set(store.listArmedEventIds());
+      const armed = new Set(hub.listArmedEventIds());
       const active: MonitoredEvent[] = [];
       let waiting = 0;
       for (const event of catalog) {
@@ -101,7 +100,7 @@ export async function main() {
         const alreadyLive = prevIds.has(event.eventId);
         if (alreadyLive || weatherReady(event, armed)) {
           if (!armed.has(event.eventId)) {
-            store.armEvent(event.eventId);
+            hub.armEvent(event.eventId);
             armed.add(event.eventId);
             const cents =
               event.maxYesPrice != null ? `${Math.round(event.maxYesPrice * 100)}¢` : "armed";
@@ -114,7 +113,6 @@ export async function main() {
       }
       weatherWaiting = waiting;
 
-      const activeIds = new Set(active.map((e) => e.eventId));
       for (const event of active) {
         if (!prevIds.has(event.eventId)) pushLog(`+ ${event.sport} ${event.title}`);
       }
@@ -123,9 +121,9 @@ export async function main() {
       }
 
       // Only finish events that left the open/live catalog — not weather waiting for 60¢.
-      const storedBefore = store.listEventIds();
+      const storedBefore = hub.listEventIds();
       const dropped = storedBefore.filter((id) => !catalogIds.has(id));
-      if (dropped.length) store.markEventsFinished(dropped);
+      if (dropped.length) hub.markEventsFinished(dropped);
 
       const statusIds = [...new Set([...catalogIds, ...dropped.slice(0, 40)])];
       if (statusIds.length) {
@@ -133,12 +131,12 @@ export async function main() {
           const sportById = new Map(catalog.map((e) => [e.eventId, e.sport]));
           for (const id of dropped) {
             if (!sportById.has(id)) {
-              const sport = store.getEventSport(id);
+              const sport = hub.getEventSport(id);
               if (sport) sportById.set(id, sport);
             }
           }
           const gammaRows = await fetchEventsByIds(statusIds);
-          store.updatePolyStatuses(
+          hub.updatePolyStatuses(
             gammaRows.map((row) => {
               const id = String(row.id);
               const sport = sportById.get(id);
@@ -186,7 +184,7 @@ export async function main() {
   const consoleTimer = setInterval(paint, CONSOLE_REFRESH_MS);
 
   const checkpointTimer = setInterval(() => {
-    checkpointDb(db, "PASSIVE");
+    hub.checkpointAll("PASSIVE");
   }, 60_000);
 
   const shutdown = () => {
@@ -194,9 +192,9 @@ export async function main() {
     clearInterval(consoleTimer);
     clearInterval(checkpointTimer);
     stream.stop();
-    checkpointDb(db, "TRUNCATE");
+    hub.checkpointAll("TRUNCATE");
     restoreConsole();
-    db.close();
+    hub.close();
     process.exit(0);
   };
 

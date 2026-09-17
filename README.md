@@ -37,15 +37,35 @@ Dashboard: http://127.0.0.1:3000
 - Full orderbook depth (all bid/ask levels from WSS level 2)
 - Best bid / ask updates between full books
 
-Data is stored in `data/monitoring.db`. Live Polymarket URLs are exported to `data/live-links.json` on every catalog refresh (~15s).
+Data is stored as **one SQLite file per sport per day**:
+
+```
+data/
+  mlb/
+    _idx.db
+    2026-09-16.db
+    2026-09-17.db
+  soccer/
+    _idx.db
+    2026-09-16.db
+  football/
+    ...
+  weather/
+    ...
+```
+
+Day = event date (`eventDate` / kickoff day). Schema uses short columns (`ob.tid/ts/bb/ba/bj/aj`) and compact JSON `{p,s}`.
+
+Legacy `data/monitoring.db` and flat `data/*.db` are no longer written.
+
+Live Polymarket URLs are exported to `data/live-links.json` on every catalog refresh (~15s).
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CATALOG_REFRESH_MS` | `15000` | How often to poll Polymarket for new markets |
-| `BOOK_THROTTLE_MS` | `1000` | Minimum gap between snapshots per token |
-| `DB_PATH` | `./data/monitoring.db` | SQLite file location |
+| `DATA_DIR` | `./data` | Directory for per-sport `*.db` files |
 | `MONITOR_ROOT` | `..` (from web/) | Project root for the dashboard |
 
 ## Dashboard pages
@@ -64,5 +84,6 @@ src/
   stream/             # CLOB WebSocket orderbook feed
   db/                 # SQLite schema + writes
 web/                  # Next.js dashboard (reads SQLite)
-data/monitoring.db    # runtime database (gitignored)
+data/{sport}/{YYYY-MM-DD}.db   # per-sport, per-day databases
+data/{sport}/_idx.db           # event/token → day index
 ```

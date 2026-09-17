@@ -1,14 +1,11 @@
 /**
- * Flush monitoring.db-wal into monitoring.db and shrink the WAL on disk.
- *
- * Stop `npm run monitor` and the Next.js dashboard first, or TRUNCATE may fail
- * while other connections hold the DB open.
+ * Flush per-sport / per-day WAL files.
  *
  *   npx tsx scripts/checkpoint-db.ts
  */
 import { existsSync } from "node:fs";
-import { openDb, checkpointDb } from "../src/db/store.ts";
-import { DB_PATH } from "../src/config/env.ts";
+import { openDb, listDayFiles } from "../src/db/store.ts";
+import { SPORTS, dbPathForDay, idxPathForSport } from "../src/config/env.ts";
 
 function sizeLabel(bytes: number) {
   if (bytes >= 1e12) return `${(bytes / 1e12).toFixed(2)} TB`;
@@ -22,27 +19,26 @@ function fileSize(path: string) {
   return Number(process.getBuiltinModule("fs").statSync(path).size);
 }
 
-const walPath = `${DB_PATH}-wal`;
-const shmPath = `${DB_PATH}-shm`;
-
-console.log("DB ", DB_PATH, sizeLabel(fileSize(DB_PATH)));
-console.log("WAL", walPath, sizeLabel(fileSize(walPath)));
-console.log("SHM", shmPath, sizeLabel(fileSize(shmPath)));
-console.log("Running wal_checkpoint(TRUNCATE)…");
-
-const db = openDb();
-try {
-  const before = db.pragma("wal_checkpoint(TRUNCATE)") as Array<{
-    busy: number;
-    log: number;
-    checkpointed: number;
-  }>;
-  console.log("result", before);
-} finally {
-  db.close();
+function checkpoint(path: string, label: string) {
+  console.log(`\n=== ${label} ===`);
+  console.log("DB ", path, sizeLabel(fileSize(path)));
+  console.log("WAL", sizeLabel(fileSize(`${path}-wal`)));
+  if (!existsSync(path)) {
+    console.log("skip (missing)");
+    return;
+  }
+  const db = openDb(path);
+  try {
+    console.log("result", db.pragma("wal_checkpoint(TRUNCATE)"));
+  } finally {
+    db.close();
+  }
+  console.log("After DB ", sizeLabel(fileSize(path)), "WAL", sizeLabel(fileSize(`${path}-wal`)));
 }
 
-console.log("After:");
-console.log("DB ", sizeLabel(fileSize(DB_PATH)));
-console.log("WAL", sizeLabel(fileSize(walPath)));
-console.log("SHM", sizeLabel(fileSize(shmPath)));
+for (const sport of SPORTS) {
+  checkpoint(idxPathForSport(sport), `${sport}/_idx`);
+  for (const day of listDayFiles(sport)) {
+    checkpoint(dbPathForDay(sport, day), `${sport}/${day}`);
+  }
+}
