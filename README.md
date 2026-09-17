@@ -2,7 +2,7 @@
 
 Real-time Polymarket orderbook recorder for **live** soccer, football (NFL), MLB matches, and **highest-temperature** weather markets across cities.
 
-The monitor watches **in-play / live** matches only (`live=true` on Polymarket), subscribes to all **moneyline** and **total over/under** tokens (including new totals that appear mid-game), and stores orderbook snapshots in a local SQLite database. A Next.js dashboard lets you review bid/ask movement later.
+The monitor watches **in-play / live** matches only (`live=true` on Polymarket), subscribes to all **moneyline** and **total over/under** tokens (including  new totals that appear mid-game), and stores orderbook snapshots in a local SQLite database. A Next.js dashboard lets you review bid/ask movement later.
 
 BC.GAME integration has been removed.
 
