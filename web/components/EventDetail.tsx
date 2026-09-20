@@ -8,7 +8,7 @@ import { quoteAtTime } from "@/lib/history";
 import { MatchRail } from "@/components/MatchRail";
 import { MatchScoreboard } from "@/components/MatchScoreboard";
 import { Topbar } from "@/components/Topbar";
-import { isEventLive } from "@/lib/live";
+import { isEventLive, matchPhase, matchPhaseLabel } from "@/lib/live";
 import { ago, finishedWhen } from "@/lib/time";
 import type { Sport } from "@/lib/db";
 import { formatVolume } from "@/lib/league";
@@ -64,8 +64,18 @@ export default function EventDetail({ eventId }: { eventId: string }) {
       if (!res.ok) throw new Error("quotes unavailable");
       return res.json() as Promise<{ series: Record<string, QuotePoint[]> }>;
     },
-    staleTime: event.data && !isEventLive(event.data) ? Infinity : 10_000,
-    refetchInterval: () => (event.data && isEventLive(event.data) ? 10_000 : false),
+    staleTime: () => {
+      if (event.data && isEventLive(event.data)) return 10_000;
+      const fa = event.data?.finishedAt;
+      if (fa != null && Date.now() - fa < 12 * 60_000) return 10_000;
+      return Infinity;
+    },
+    refetchInterval: () => {
+      if (event.data && isEventLive(event.data)) return 10_000;
+      const fa = event.data?.finishedAt;
+      if (fa != null && Date.now() - fa < 12 * 60_000) return 10_000;
+      return false;
+    },
   });
 
   const onFrame = useCallback((capturedAt: number) => {
@@ -79,12 +89,19 @@ export default function EventDetail({ eventId }: { eventId: string }) {
     setTokenId("");
   }, [eventId]);
 
-  // Seed from kickoff so sidebar isn't stuck on settled 0.1¢ before scrubber mounts.
+  // Live / open: follow the latest recorded book — never seed a future kickoff
+  // (that parked the scrubber on a stale prematch frame vs Polymarket live).
   useEffect(() => {
-    if (frameAt != null) return;
-    const start = data?.startTime ? Date.parse(data.startTime) : NaN;
+    if (frameAt != null || !data) return;
+    if (isEventLive(data) || matchPhase(data) === "open") {
+      if (data.lastSnapshotAt != null && Number.isFinite(data.lastSnapshotAt)) {
+        setFrameAt(data.lastSnapshotAt);
+      }
+      return;
+    }
+    const start = data.startTime ? Date.parse(data.startTime) : NaN;
     if (Number.isFinite(start)) setFrameAt(start);
-  }, [data?.startTime, frameAt, eventId]);
+  }, [data, frameAt, eventId]);
 
   const quoteById = useMemo(() => {
     const map = new Map<string, { bestBid: number | null; bestAsk: number | null }>();
@@ -139,6 +156,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
     allTokens[0]?.tokenId;
 
   const live = data ? isEventLive(data) : false;
+  const phase = data ? matchPhase(data) : null;
   const sportsData = sports.data?.sports;
   const scoreRows = scores.data?.scores ?? [];
   const lastScoreAt = scoreRows.length ? scoreRows[scoreRows.length - 1]!.capturedAt : null;
@@ -167,8 +185,8 @@ export default function EventDetail({ eventId }: { eventId: string }) {
               <span className="crumb-current">{data.title}</span>
               <span className="crumb-meta">
                 <span className={`sport-chip sport-${data.sport}`}>{data.sport}</span>
-                <span className={live ? "match-status is-live" : "match-status"}>
-                  {live ? "Live" : "Finished"}
+                <span className={live || phase === "live" ? "match-status is-live" : phase === "voided" ? "match-status is-void" : "match-status"}>
+                  {phase ? matchPhaseLabel(phase, data.sport, data.gameStatus) : live ? "Live" : "Finished"}
                 </span>
               </span>
             </div>

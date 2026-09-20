@@ -293,7 +293,7 @@ async function fetchTagPages(
     let lastErr: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await polyFetch(url, 20_000);
+        const res = await polyFetch(url, 25_000);
         if (!res.ok) throw new Error(`Gamma HTTP ${res.status}`);
         page = (await res.json()) as GammaEvent[];
         break;
@@ -312,8 +312,9 @@ async function fetchTagPages(
 
 export async function fetchEventsByTags(tags: string[]): Promise<GammaEvent[]> {
   const byId = new Map<string, GammaEvent>();
+  // Live boards are small — one page per tag is enough; deep paging was starving the catalog.
   const results = await Promise.allSettled(
-    tags.map((tag) => fetchTagPages(tag, { liveOnly: true, maxOffset: 200 }))
+    tags.map((tag) => fetchTagPages(tag, { liveOnly: true, maxOffset: 50 }))
   );
   for (const result of results) {
     if (result.status !== "fulfilled") continue;
@@ -328,11 +329,12 @@ export async function fetchEventsByTags(tags: string[]): Promise<GammaEvent[]> {
   return [...byId.values()];
 }
 
-/** Open (not necessarily live) events — used for daily weather markets. */
+/** Open (not necessarily live) events — used for weather + tennis prematch. */
 export async function fetchOpenEventsByTags(tags: string[]): Promise<GammaEvent[]> {
   const byId = new Map<string, GammaEvent>();
+  // Keep open dumps small so they can't block the live soccer/MLB catalog for minutes.
   const results = await Promise.allSettled(
-    tags.map((tag) => fetchTagPages(tag, { liveOnly: false, maxOffset: 800 }))
+    tags.map((tag) => fetchTagPages(tag, { liveOnly: false, maxOffset: 150 }))
   );
   for (const result of results) {
     if (result.status !== "fulfilled") continue;
@@ -348,24 +350,10 @@ export async function fetchOpenEventsByTags(tags: string[]): Promise<GammaEvent[
 }
 
 export const SPORT_TAGS: Record<MonitorSport, string[]> = {
-  soccer: [
-    "soccer",
-    "epl",
-    "premier-league",
-    "la-liga",
-    "bundesliga",
-    "serie-a",
-    "ligue-1",
-    "mls",
-    "ucl",
-    "liga-mx",
-    "j-league",
-    "japan-j-league",
-    "japan-j1-league",
-    "japan-j2-league",
-  ],
+  // Primary live tag first — league tags are backup if the umbrella misses a board.
+  soccer: ["soccer", "epl", "mls", "ucl", "liga-mx", "j-league"],
   football: ["nfl", "ncaa-football", "football"],
-  mlb: ["mlb", "baseball", "npb", "kbo"],
+  mlb: ["mlb", "baseball"],
   weather: ["highest-temperature"],
   /** Open ATP/WTA matches; ITF filtered in parsers (seriesSlug / title). */
   tennis: ["tennis"],

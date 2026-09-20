@@ -52,7 +52,7 @@ export function Dashboard({ sport }: { sport?: "soccer" | "football" | "mlb" | "
         </div>
       </header>
 
-      <EventList events={events.data ?? []} loading={events.isLoading} />
+      <EventList events={events.data ?? []} loading={events.isLoading} sport={sport} />
     </div>
   );
 }

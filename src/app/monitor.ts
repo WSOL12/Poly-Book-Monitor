@@ -1,6 +1,7 @@
 import {
   CATALOG_REFRESH_MS,
   CONSOLE_REFRESH_MS,
+  POST_FINISH_GRACE_MS,
   WEATHER_ARM_PRICE,
 } from "../config/env.ts";
 import {
@@ -24,19 +25,39 @@ import { saveLiveLinks } from "../infra/links.ts";
 import { paintConsole, restoreConsole } from "../ui/console.ts";
 import type { MonitoredEvent, MonitoredToken, MonitorSport } from "../types/monitoring.ts";
 
-const SPORTS: MonitorSport[] = ["soccer", "football", "mlb", "weather", "tennis"];
+/** Live boards — refresh first so soccer isn't blocked by weather/tennis dumps. */
+const LIVE_SPORTS: MonitorSport[] = ["soccer", "football", "mlb"];
+const OPEN_SPORTS: MonitorSport[] = ["weather", "tennis"];
+/** Sports where markets keep trading after Gamma flips live=false / FINAL. */
+const SETTLEMENT_GRACE_SPORTS = new Set<MonitorSport>(["soccer", "football", "mlb"]);
 const eventLog: string[] = [];
 
 function pushLog(message: string) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${message}`;
   eventLog.push(line);
-  if (eventLog.length > 4) eventLog.shift();
+  if (eventLog.length > 8) eventLog.shift();
 }
 
 function weatherReady(event: MonitoredEvent, armed: Set<string>) {
   if (armed.has(event.eventId)) return true;
   const price = event.maxYesPrice;
   return price != null && price >= WEATHER_ARM_PRICE;
+}
+
+type SportBatch = { sport: MonitorSport; events: MonitoredEvent[] };
+
+async function fetchLiveSport(sport: MonitorSport): Promise<SportBatch> {
+  const gammaEvents = await fetchEventsByTags(SPORT_TAGS[sport]);
+  return { sport, events: parseLiveSportEvents(sport, gammaEvents) };
+}
+
+async function fetchOpenSport(sport: MonitorSport): Promise<SportBatch> {
+  if (sport === "weather") {
+    const gammaEvents = await fetchOpenEventsByTags(SPORT_TAGS.weather);
+    return { sport, events: parseWeatherEvents(gammaEvents) };
+  }
+  const gammaEvents = await fetchOpenEventsByTags(SPORT_TAGS.tennis);
+  return { sport, events: parseOpenTennisEvents(gammaEvents) };
 }
 
 export async function main() {
@@ -47,8 +68,11 @@ export async function main() {
   let events: MonitoredEvent[] = [];
   let tokens: MonitoredToken[] = [];
   let weatherWaiting = 0;
-  let refreshing = false;
+  let liveRefreshing = false;
+  let openRefreshing = false;
   let lastCatalogAt = 0;
+  /** Finished events still subscribed so settlement ladders land in SQLite. */
+  const finishing = new Map<string, { event: MonitoredEvent; since: number }>();
 
   const stream = new OrderbookStream(() => tokens, hub, pushLog);
 
@@ -61,152 +85,253 @@ export async function main() {
       wss: stream.getStats(),
       catalogAt: lastCatalogAt,
       startedAt,
-      refreshing,
+      refreshing: liveRefreshing || openRefreshing,
       log: [...eventLog],
       weatherWaiting,
     });
   };
 
-  const refreshCatalog = async () => {
-    if (refreshing) return;
-    refreshing = true;
+  const applyCatalog = async (
+    batches: SportBatch[],
+    okSports: Set<MonitorSport>,
+    keepSports: MonitorSport[]
+  ) => {
+    const catalog: MonitoredEvent[] = [];
+    for (const batch of batches) catalog.push(...batch.events);
+    // Preserve sports we didn't refresh this pass (e.g. keep tennis while updating soccer).
+    for (const sport of keepSports) {
+      if (okSports.has(sport)) continue;
+      for (const event of events) {
+        if (event.sport === sport) catalog.push(event);
+      }
+    }
+
+    if (!catalog.length && !okSports.size) return;
+
+    catalog.sort(
+      (a, b) => (a.eventDate ?? "").localeCompare(b.eventDate ?? "") || a.title.localeCompare(b.title)
+    );
+
+    const catalogIds = new Set(catalog.map((e) => e.eventId));
+    const prevIds = new Set(events.map((e) => e.eventId));
+
+    hub.syncCatalog(catalog);
+
+    const armed = new Set(hub.listArmedEventIds());
+    const active: MonitoredEvent[] = [];
+    let waiting = 0;
+    for (const event of catalog) {
+      if (event.sport !== "weather") {
+        active.push(event);
+        continue;
+      }
+      const alreadyLive = prevIds.has(event.eventId);
+      if (alreadyLive || weatherReady(event, armed)) {
+        if (!armed.has(event.eventId)) {
+          hub.armEvent(event.eventId);
+          armed.add(event.eventId);
+          const cents =
+            event.maxYesPrice != null ? `${Math.round(event.maxYesPrice * 100)}¢` : "armed";
+          pushLog(`ARM weather ${cents} ${event.title}`);
+        }
+        active.push(event);
+      } else {
+        waiting++;
+      }
+    }
+    weatherWaiting = waiting;
+
+    for (const event of active) {
+      if (!prevIds.has(event.eventId)) pushLog(`+ ${event.sport} ${event.title}`);
+    }
+    for (const event of events) {
+      if (catalogIds.has(event.eventId) || finishing.has(event.eventId)) continue;
+      if (!okSports.has(event.sport)) continue;
+      const why =
+        event.sport === "tennis" && event.gameStatus ? ` (${event.gameStatus})` : "";
+      pushLog(`- ${event.sport} ${event.title}${why}`);
+    }
+
+    const storedBefore = hub.listEventIds();
+    const dropped = storedBefore.filter((id) => {
+      if (catalogIds.has(id)) return false;
+      const sport = hub.getEventSport(id) ?? events.find((e) => e.eventId === id)?.sport;
+      // Never finish a sport we failed to refresh this pass.
+      if (sport && !okSports.has(sport as MonitorSport)) return false;
+      return true;
+    });
+    if (dropped.length) hub.markEventsFinished(dropped);
+
+    const activeIds = new Set(active.map((e) => e.eventId));
+    for (const id of activeIds) finishing.delete(id);
+    for (const prev of events) {
+      if (activeIds.has(prev.eventId)) continue;
+      if (!SETTLEMENT_GRACE_SPORTS.has(prev.sport)) continue;
+      if (finishing.has(prev.eventId)) continue;
+      if (!okSports.has(prev.sport)) continue;
+      finishing.set(prev.eventId, { event: prev, since: Date.now() });
+      pushLog(`grace ${prev.sport} ${prev.title}`);
+    }
+    const now = Date.now();
+    for (const [id, row] of finishing) {
+      if (now - row.since >= POST_FINISH_GRACE_MS) finishing.delete(id);
+    }
+    const graceEvents = [...finishing.values()].map((row) => row.event);
+
+    const statusIds = [...new Set([...catalogIds, ...dropped.slice(0, 40)])];
+    if (statusIds.length) {
+      try {
+        const sportById = new Map(catalog.map((e) => [e.eventId, e.sport]));
+        for (const id of dropped) {
+          if (!sportById.has(id)) {
+            const sport = hub.getEventSport(id);
+            if (sport) sportById.set(id, sport);
+          }
+        }
+        const gammaRows = await fetchEventsByIds(statusIds);
+        hub.updatePolyStatuses(
+          gammaRows.map((row) => {
+            const id = String(row.id);
+            const sport = sportById.get(id);
+            const leftCatalog = !catalogIds.has(id);
+            const tennisReason = sport === "tennis" ? tennisStopReason(row) : null;
+            const finished =
+              sport === "tennis"
+                ? tennisReason != null || leftCatalog || isFinishedGammaEvent(row, { sport })
+                : isFinishedGammaEvent(row, { sport }) || leftCatalog;
+            const gameStatus =
+              sport === "tennis"
+                ? tennisReason ?? (leftCatalog ? "started" : row.gameStatus?.trim() || null)
+                : row.gameStatus?.trim() || row.period?.trim() || null;
+            return {
+              eventId: id,
+              ended: finished,
+              polyLive: row.live === true && !finished,
+              closed: row.closed === true,
+              gameStatus,
+              finishedAt: finished ? finishedAtFromGamma(row, { sport }) ?? Date.now() : null,
+              score: row.score ?? null,
+              period: row.period ?? null,
+              elapsed: row.elapsed ?? null,
+            };
+          })
+        );
+      } catch (err) {
+        pushLog(`status: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    const streaming = [...active, ...graceEvents];
+    events = streaming;
+    tokens = allTokens(streaming);
+    lastCatalogAt = Date.now();
+    saveLiveLinks(active);
+    stream.sync();
+    const soccerN = active.filter((e) => e.sport === "soccer").length;
+    const tennisN = active.filter((e) => e.sport === "tennis").length;
+    const graceN = graceEvents.length;
+    pushLog(
+      `ok ${active.length} live · soccer ${soccerN} · tennis ${tennisN} · ${tokens.length} tok${
+        graceN ? ` · grace ${graceN}` : ""
+      } · wx wait ${waiting}`
+    );
+  };
+
+  const refreshLiveCatalog = async () => {
+    if (liveRefreshing) return;
+    liveRefreshing = true;
     paint();
     try {
-      const parts = await Promise.all(
-        SPORTS.map(async (sport) => {
-          if (sport === "weather") {
-            const gammaEvents = await fetchOpenEventsByTags(SPORT_TAGS.weather);
-            return parseWeatherEvents(gammaEvents);
-          }
-          if (sport === "tennis") {
-            // Open prematch only — stop when started / canceled / retired (no ITF).
-            const gammaEvents = await fetchOpenEventsByTags(SPORT_TAGS.tennis);
-            return parseOpenTennisEvents(gammaEvents);
-          }
-          const gammaEvents = await fetchEventsByTags(SPORT_TAGS[sport]);
-          return parseLiveSportEvents(sport, gammaEvents);
-        })
+      // Soccer first — never block in-play boards on nfl/mlb Gamma timeouts.
+      const soccerResult = await Promise.allSettled([fetchLiveSport("soccer")]);
+      const okSports = new Set<MonitorSport>();
+      const batches: SportBatch[] = [];
+      if (soccerResult[0]?.status === "fulfilled") {
+        okSports.add("soccer");
+        batches.push(soccerResult[0].value);
+      } else {
+        const err =
+          soccerResult[0]?.status === "rejected"
+            ? soccerResult[0].reason instanceof Error
+              ? soccerResult[0].reason.message
+              : String(soccerResult[0].reason)
+            : "unknown";
+        pushLog(`catalog soccer: ${err}`);
+        const kept = events.filter((e) => e.sport === "soccer");
+        if (kept.length) batches.push({ sport: "soccer", events: kept });
+      }
+      if (batches.length) await applyCatalog(batches, okSports, [...OPEN_SPORTS, "football", "mlb"]);
+
+      const other = await Promise.allSettled(
+        (["football", "mlb"] as MonitorSport[]).map((sport) => fetchLiveSport(sport))
       );
-      const catalog = parts.flat();
-      catalog.sort(
-        (a, b) => (a.eventDate ?? "").localeCompare(b.eventDate ?? "") || a.title.localeCompare(b.title)
-      );
-
-      const catalogIds = new Set(catalog.map((e) => e.eventId));
-      const prevIds = new Set(events.map((e) => e.eventId));
-
-      // Keep full open catalog in DB; arm weather that crossed the price gate.
-      hub.syncCatalog(catalog);
-
-      const armed = new Set(hub.listArmedEventIds());
-      const active: MonitoredEvent[] = [];
-      let waiting = 0;
-      for (const event of catalog) {
-        if (event.sport !== "weather") {
-          active.push(event);
+      const otherOk = new Set<MonitorSport>();
+      const otherBatches: SportBatch[] = [];
+      const otherSports: MonitorSport[] = ["football", "mlb"];
+      for (let i = 0; i < other.length; i++) {
+        const sport = otherSports[i]!;
+        const result = other[i]!;
+        if (result.status === "fulfilled") {
+          otherOk.add(sport);
+          otherBatches.push(result.value);
           continue;
         }
-        // Don't abandon a city we are already streaming this process, even if
-        // Gamma's yes-price print is stale/below the 60¢ gate.
-        const alreadyLive = prevIds.has(event.eventId);
-        if (alreadyLive || weatherReady(event, armed)) {
-          if (!armed.has(event.eventId)) {
-            hub.armEvent(event.eventId);
-            armed.add(event.eventId);
-            const cents =
-              event.maxYesPrice != null ? `${Math.round(event.maxYesPrice * 100)}¢` : "armed";
-            pushLog(`ARM weather ${cents} ${event.title}`);
-          }
-          active.push(event);
-        } else {
-          waiting++;
-        }
+        const err = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        pushLog(`catalog ${sport}: ${err}`);
+        const kept = events.filter((e) => e.sport === sport);
+        if (kept.length) otherBatches.push({ sport, events: kept });
       }
-      weatherWaiting = waiting;
-
-      for (const event of active) {
-        if (!prevIds.has(event.eventId)) pushLog(`+ ${event.sport} ${event.title}`);
+      if (otherOk.size || otherBatches.length) {
+        await applyCatalog(otherBatches, otherOk, [...OPEN_SPORTS, "soccer"]);
       }
-      for (const event of events) {
-        if (!catalogIds.has(event.eventId)) {
-          const why =
-            event.sport === "tennis" && event.gameStatus
-              ? ` (${event.gameStatus})`
-              : "";
-          pushLog(`- ${event.sport} ${event.title}${why}`);
-        }
-      }
-
-      // Only finish events that left the open/live catalog — not weather waiting for 60¢.
-      const storedBefore = hub.listEventIds();
-      const dropped = storedBefore.filter((id) => !catalogIds.has(id));
-      if (dropped.length) hub.markEventsFinished(dropped);
-
-      const statusIds = [...new Set([...catalogIds, ...dropped.slice(0, 40)])];
-      if (statusIds.length) {
-        try {
-          const sportById = new Map(catalog.map((e) => [e.eventId, e.sport]));
-          for (const id of dropped) {
-            if (!sportById.has(id)) {
-              const sport = hub.getEventSport(id);
-              if (sport) sportById.set(id, sport);
-            }
-          }
-          const gammaRows = await fetchEventsByIds(statusIds);
-          hub.updatePolyStatuses(
-            gammaRows.map((row) => {
-              const id = String(row.id);
-              const sport = sportById.get(id);
-              const leftCatalog = !catalogIds.has(id);
-              const tennisReason = sport === "tennis" ? tennisStopReason(row) : null;
-              const finished =
-                sport === "tennis"
-                  ? tennisReason != null || leftCatalog || isFinishedGammaEvent(row, { sport })
-                  : isFinishedGammaEvent(row, { sport }) || leftCatalog;
-              const gameStatus =
-                sport === "tennis"
-                  ? tennisReason ?? (leftCatalog ? "started" : row.gameStatus?.trim() || null)
-                  : row.gameStatus?.trim() || row.period?.trim() || null;
-              return {
-                eventId: id,
-                ended: finished,
-                polyLive: row.live === true && !finished,
-                closed: row.closed === true,
-                gameStatus,
-                finishedAt: finished ? finishedAtFromGamma(row, { sport }) ?? Date.now() : null,
-                score: row.score ?? null,
-                period: row.period ?? null,
-                elapsed: row.elapsed ?? null,
-              };
-            })
-          );
-        } catch (err) {
-          pushLog(`status: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-
-      events = active;
-      tokens = allTokens(active);
-      lastCatalogAt = Date.now();
-      saveLiveLinks(active);
-      stream.sync();
-      const tennisN = active.filter((e) => e.sport === "tennis").length;
-      pushLog(
-        `ok ${active.length} live · ${tokens.length} tok · tennis ${tennisN} · weather wait ${waiting} (<${Math.round(WEATHER_ARM_PRICE * 100)}¢)`
-      );
     } catch (error) {
-      pushLog(`catalog: ${error instanceof Error ? error.message : String(error)}`);
+      pushLog(`catalog live: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      refreshing = false;
+      liveRefreshing = false;
     }
   };
 
-  await refreshCatalog();
-  paint();
+  const refreshOpenCatalog = async () => {
+    if (openRefreshing) return;
+    openRefreshing = true;
+    paint();
+    try {
+      const settled = await Promise.allSettled(OPEN_SPORTS.map((sport) => fetchOpenSport(sport)));
+      const okSports = new Set<MonitorSport>();
+      const batches: SportBatch[] = [];
+      for (let i = 0; i < settled.length; i++) {
+        const sport = OPEN_SPORTS[i]!;
+        const result = settled[i]!;
+        if (result.status === "fulfilled") {
+          okSports.add(sport);
+          batches.push(result.value);
+          continue;
+        }
+        const err = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        pushLog(`catalog ${sport}: ${err}`);
+        const kept = events.filter((e) => e.sport === sport);
+        if (kept.length) batches.push({ sport, events: kept });
+      }
+      if (!okSports.size) return;
+      await applyCatalog(batches, okSports, LIVE_SPORTS);
+    } catch (error) {
+      pushLog(`catalog open: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      openRefreshing = false;
+    }
+  };
 
-  const refreshTimer = setInterval(() => {
-    void refreshCatalog().then(paint);
+  await refreshLiveCatalog();
+  paint();
+  void refreshOpenCatalog().then(paint);
+
+  const liveTimer = setInterval(() => {
+    void refreshLiveCatalog().then(paint);
   }, CATALOG_REFRESH_MS);
+
+  const openTimer = setInterval(() => {
+    void refreshOpenCatalog().then(paint);
+  }, Math.max(CATALOG_REFRESH_MS * 2, 60_000));
 
   const consoleTimer = setInterval(paint, CONSOLE_REFRESH_MS);
 
@@ -214,17 +339,16 @@ export async function main() {
     hub.checkpointAll("PASSIVE");
   }, 60_000);
 
-  const shutdown = () => {
-    clearInterval(refreshTimer);
+  const onSignal = () => {
+    clearInterval(liveTimer);
+    clearInterval(openTimer);
     clearInterval(consoleTimer);
     clearInterval(checkpointTimer);
     stream.stop();
-    hub.checkpointAll("TRUNCATE");
-    restoreConsole();
     hub.close();
+    restoreConsole();
     process.exit(0);
   };
-
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
 }

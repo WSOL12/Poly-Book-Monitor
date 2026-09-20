@@ -5,7 +5,7 @@ import { useMemo, useState } from "react";
 import { MatchListControls } from "@/components/MatchListControls";
 import type { EventRow } from "@/lib/db";
 import { formatVolume, leagueAccent, resolveLeague } from "@/lib/league";
-import { splitEvents } from "@/lib/live";
+import { matchPhase, matchPhaseLabel, splitEvents, type MatchPhase } from "@/lib/live";
 import {
   DEFAULT_MATCH_FILTERS,
   filterAndSortEvents,
@@ -16,7 +16,7 @@ import {
 import { eventResultLabel } from "@/lib/score";
 import { ago, finishedWhen } from "@/lib/time";
 
-type Tab = "live" | "finished";
+type Tab = MatchPhase;
 
 const SPORT_LABEL: Record<string, string> = {
   soccer: "Soccer",
@@ -28,10 +28,15 @@ const SPORT_LABEL: Record<string, string> = {
 
 function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
   const result = eventResultLabel(event);
+  const phase = matchPhase(event);
   const { code, label: league } = resolveLeague(event);
   const accent = leagueAccent(code);
+  const statusOn = tab === "open" || tab === "live";
   return (
-    <Link href={`/${event.sport}/event/${event.eventId}`} className={`match-row${tab === "live" ? " match-row-live" : ""}`}>
+    <Link
+      href={`/${event.sport}/event/${event.eventId}`}
+      className={`match-row${statusOn ? " match-row-live" : ""}`}
+    >
       <div className="match-main">
         <div className="match-title">{event.title}</div>
         <div className="match-meta">
@@ -39,7 +44,7 @@ function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
           <span className="match-league" style={{ color: accent }}>
             {league}
           </span>
-          {event.period && event.sport !== "weather" ? (
+          {event.period && event.sport !== "weather" && phase !== "open" ? (
             <span className="match-period">{event.period}</span>
           ) : null}
           {event.eventDate ? <span className="match-date">{event.eventDate}</span> : null}
@@ -47,18 +52,35 @@ function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
         </div>
       </div>
       {result ? (
-        <div className="match-result mono" title={event.sport === "weather" ? "Winning temp" : event.sport === "tennis" ? "Stop reason" : "Score"}>
+        <div
+          className="match-result mono"
+          title={
+            event.sport === "weather"
+              ? "Winning temp"
+              : event.sport === "tennis"
+                ? "Status"
+                : "Score"
+          }
+        >
           {result}
         </div>
       ) : (
         <div className="match-result match-result-empty mono">—</div>
       )}
       <div className="match-side">
-        <span className={`match-status${tab === "live" ? " is-live" : ""}`}>
-          {tab === "live" ? (event.sport === "weather" || event.sport === "tennis" ? "Open" : "Live") : "Finished"}
+        <span
+          className={`match-status${statusOn ? " is-live" : ""}${phase === "open" ? " is-open" : ""}${
+            phase === "voided" ? " is-void" : ""
+          }${tab !== "open" && tab !== "live" && event.lastSnapshotAt == null ? " is-void" : ""}`}
+        >
+          {tab !== "open" && tab !== "live" && event.lastSnapshotAt == null
+            ? "No book"
+            : matchPhaseLabel(phase, event.sport, event.gameStatus)}
         </span>
         <span className="match-time mono">
-          {tab === "finished" ? finishedWhen(event.finishedAt, event.eventDate) : ago(event.lastSnapshotAt)}
+          {tab === "finished" || tab === "voided"
+            ? finishedWhen(event.finishedAt, event.eventDate)
+            : ago(event.lastSnapshotAt)}
         </span>
       </div>
       <span className="match-chevron" aria-hidden>
@@ -68,13 +90,24 @@ function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
   );
 }
 
-export function EventList({ events, loading }: { events: EventRow[]; loading?: boolean }) {
-  const [tab, setTab] = useState<Tab>("live");
+export function EventList({
+  events,
+  loading,
+  sport,
+}: {
+  events: EventRow[];
+  loading?: boolean;
+  sport?: string;
+}) {
+  const tennisMode = sport === "tennis" || events.some((e) => e.sport === "tennis");
+  const weatherMode = sport === "weather";
+  const [tab, setTab] = useState<Tab>(tennisMode || weatherMode ? "open" : "live");
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<MatchListFilters>(DEFAULT_MATCH_FILTERS);
 
-  const { live, finished } = useMemo(() => splitEvents(events), [events]);
-  const pool = tab === "live" ? live : finished;
+  const { open, live, voided, finished } = useMemo(() => splitEvents(events), [events]);
+  const pool =
+    tab === "open" ? open : tab === "live" ? live : tab === "voided" ? voided : finished;
 
   const searched = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -116,20 +149,57 @@ export function EventList({ events, loading }: { events: EventRow[]; loading?: b
     );
   }
 
+  const tabLabel =
+    tab === "open"
+      ? "Open"
+      : tab === "live"
+        ? "Live"
+        : tab === "voided"
+          ? "Void"
+          : weatherMode
+            ? "Finished"
+            : "Done";
+
   return (
     <div className="match-panel">
       <div className="match-toolbar">
         <div className="seg" role="tablist" aria-label="Match status">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "live"}
-            className={`seg-btn${tab === "live" ? " on" : ""}`}
-            onClick={() => setTab("live")}
-          >
-            Live
-            <span className="seg-count">{live.length}</span>
-          </button>
+          {tennisMode || weatherMode ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "open"}
+              className={`seg-btn${tab === "open" ? " on" : ""}`}
+              onClick={() => setTab("open")}
+            >
+              Open
+              <span className="seg-count">{open.length}</span>
+            </button>
+          ) : null}
+          {!weatherMode ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "live"}
+              className={`seg-btn${tab === "live" ? " on" : ""}`}
+              onClick={() => setTab("live")}
+            >
+              Live
+              <span className="seg-count">{live.length}</span>
+            </button>
+          ) : null}
+          {tennisMode ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "voided"}
+              className={`seg-btn${tab === "voided" ? " on" : ""}`}
+              onClick={() => setTab("voided")}
+            >
+              Void
+              <span className="seg-count">{voided.length}</span>
+            </button>
+          ) : null}
           <button
             type="button"
             role="tab"
@@ -137,7 +207,7 @@ export function EventList({ events, loading }: { events: EventRow[]; loading?: b
             className={`seg-btn${tab === "finished" ? " on" : ""}`}
             onClick={() => setTab("finished")}
           >
-            Finished
+            {weatherMode ? "Finished" : "Done"}
             <span className="seg-count">{finished.length}</span>
           </button>
         </div>
@@ -161,7 +231,7 @@ export function EventList({ events, loading }: { events: EventRow[]; loading?: b
       {filtered.length === 0 ? (
         <div className="panel-empty panel-empty-inline">
           <div className="panel-empty-title">
-            No {tab === "live" ? "Live" : "Finished"} matches
+            No {tabLabel} matches
             {search.trim() || filters.group || filters.volumeMin || filters.date !== "all"
               ? " for these filters"
               : ""}
@@ -170,10 +240,22 @@ export function EventList({ events, loading }: { events: EventRow[]; loading?: b
             <button type="button" className="btn-text" onClick={() => setSearch("")}>
               Clear search
             </button>
+          ) : tab === "voided" && voided.length === 0 ? (
+            <p className="panel-empty-text">Canceled and retired matches land here.</p>
           ) : tab === "finished" && finished.length === 0 ? (
             <p className="panel-empty-text">
-              Finished matches are events Polymarket marks as ended or closed.
+              {tennisMode
+                ? "Other settled tennis (not cancel/retire) lands here."
+                : "Finished matches are events Polymarket marks as ended or closed."}
             </p>
+          ) : tab === "open" && open.length === 0 ? (
+            <p className="panel-empty-text">
+              {tennisMode
+                ? "Open = prematch books still being recorded."
+                : "No open markets right now."}
+            </p>
+          ) : tab === "live" && live.length === 0 && tennisMode ? (
+            <p className="panel-empty-text">Live = matches that have started (recording stopped).</p>
           ) : null}
         </div>
       ) : (

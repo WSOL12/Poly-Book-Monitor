@@ -50,6 +50,8 @@ export function utcDay(ms = Date.now()) {
 export const CATALOG_REFRESH_MS = Number(process.env.CATALOG_REFRESH_MS ?? 30_000);
 export const CONSOLE_REFRESH_MS = Number(process.env.CONSOLE_REFRESH_MS ?? 2_000);
 export const WEATHER_ARM_PRICE = Number(process.env.WEATHER_ARM_PRICE ?? 0.6);
+/** Keep streaming after Gamma marks finished so settlement books (0.1¢) get recorded. */
+export const POST_FINISH_GRACE_MS = Number(process.env.POST_FINISH_GRACE_MS ?? 20 * 60_000);
 
 /** @deprecated */
 export const DB_PATH = process.env.DB_PATH ?? resolve(DATA_DIR, "monitoring.db");

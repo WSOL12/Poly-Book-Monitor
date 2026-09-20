@@ -58,6 +58,8 @@ export function renderConsole(state: ConsoleState, cols: number, maxRows: number
   const lines: string[] = [];
   const uptime = ago(state.startedAt);
   const wssState = state.wss.connected ? (state.wss.stale ? "STALE" : "LIVE") : "DOWN";
+  const shardInfo =
+    state.wss.shards != null ? ` ${state.wss.liveShards ?? 0}/${state.wss.shards}` : "";
   const rate =
     state.wss.snapshotsWritten > 0
       ? (state.wss.snapshotsWritten / Math.max(1, (Date.now() - state.startedAt) / 60000)).toFixed(0)
@@ -66,7 +68,7 @@ export function renderConsole(state: ConsoleState, cols: number, maxRows: number
 
   lines.push(`${ESC}[1;36mPOLY MONITOR${ESC}[0m  soccer / football / mlb / weather / tennis`);
   lines.push(
-    `process  WSS ${wssState}  |  ${state.events.length} events  |  ${state.tokens.length} tokens  |  up ${uptime}`
+    `process  WSS ${wssState}${shardInfo}  |  ${state.events.length} events  |  ${state.tokens.length} tokens  |  up ${uptime}`
   );
   lines.push(
     `data     ${state.snapshots.toLocaleString()} snaps  |  ${rate}/min  |  catalog ${catalog}  |  msg ${ago(state.wss.lastMessageAt)}`

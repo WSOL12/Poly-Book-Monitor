@@ -7,11 +7,28 @@ import { polyFetch } from "../utils/polyNet.ts";
 const URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const CLOB_BOOK = "https://clob.polymarket.com/book";
 const PING_MS = 10_000;
-const STALE_MS = 20_000;
-const WATCH_MS = 5_000;
-const MAX_BACKOFF_MS = 15_000;
+/** Treat socket as dead if no message/pong for this long. */
+const STALE_MS = 12_000;
+/** How often we check for silence. */
+const WATCH_MS = 2_000;
+/** First reconnect attempt — keep gaps short. */
+const MIN_BACKOFF_MS = 250;
+const MAX_BACKOFF_MS = 5_000;
+/** Stagger shard connects so Polymarket doesn't refuse a 60-socket burst. */
+const SHARD_CONNECT_STAGGER_MS = 75;
+/** Polymarket market WSS dies when one socket carries thousands of assets. */
+const MAX_ASSETS_PER_WS = 40;
 /** Background REST reconcile when we lack a seed book or best moved without sizes. */
-const REST_REFRESH_MS = 5_000;
+const REST_REFRESH_MS = 3_000;
+/** When a shard is down/stale, poll REST so books keep moving. */
+const REST_FALLBACK_MS = 1_000;
+const REST_FALLBACK_CONCURRENCY = 60;
+const REST_STALE_TOKEN_MS = 3_000;
+const REST_BOOK_TIMEOUT_MS = 3_500;
+/** After a shard reconnect, pull full books so missed WSS deltas don't leave holes. */
+const RESYNC_CONCURRENCY = 24;
+/** If no shard is live this long, tear down and rebuild all sockets. */
+const WSS_DEAD_REBUILD_MS = 15_000;
 
 type Level = { price: string; size: string };
 type BookEvent = { event_type: "book"; asset_id: string; bids?: Level[]; asks?: Level[] };
@@ -53,6 +70,8 @@ export type StreamStats = {
   sampleWrites: number;
   lastMessageAt: number | null;
   quotes: Map<string, TokenQuote>;
+  shards?: number;
+  liveShards?: number;
 };
 
 function subscribePayload(tokens: string[]) {
@@ -71,6 +90,12 @@ function patchPayload(tokens: string[], operation: "subscribe" | "unsubscribe") 
       ? { assets_ids: tokens, operation, initial_dump: true }
       : { assets_ids: tokens, operation }
   );
+}
+
+function chunkIds(ids: string[], size: number) {
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
 }
 
 function bestPrice(levels: BookLevel[], side: "bid" | "ask") {
@@ -111,7 +136,6 @@ function uncrossBook(bids: BookLevel[], asks: BookLevel[]): ParsedBook {
     const bb = bestOf(nextBids, "bid");
     const ba = bestOf(nextAsks, "ask");
     if (bb == null || ba == null || bb < ba) break;
-    // Prefer keeping the ask ladder when bids went stale after an ask improve.
     nextBids = nextBids.filter((l) => l.price < ba);
     const bb2 = bestOf(nextBids, "bid");
     if (bb2 != null && ba <= bb2) {
@@ -184,125 +208,81 @@ function applyPriceChange(book: ParsedBook, change: PriceChange): ParsedBook {
   return uncrossBook(bids, asks);
 }
 
-export class OrderbookStream {
+type ShardHandlers = {
+  onMessage: (event: BookEvent | PriceChangeEvent | BestBidAskEvent) => void;
+  onConnected?: (tokens: string[]) => void;
+  onLog?: (message: string) => void;
+};
+
+/** One Polymarket market socket — keep asset count small so heartbeats survive. */
+class MarketShard {
   private ws: WebSocket | null = null;
   private ping: ReturnType<typeof setInterval> | null = null;
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private reconnect: ReturnType<typeof setTimeout> | null = null;
-  private syncTimer: ReturnType<typeof setTimeout> | null = null;
-  private tokenSignature = "";
-  private pendingTokens: string[] = [];
-  private subscribed = new Set<string>();
-  private stopped = false;
   private ignoreClose = false;
-  private backoffMs = 1_000;
-  private lastMessageAt = 0;
-  private readonly lastBookSig = new Map<string, string>();
-  private readonly tokenMeta = new Map<string, MonitoredToken>();
-  private readonly bookCache = new Map<string, ParsedBook>();
-  private messages = 0;
-  private bookEvents = 0;
-  private snapshotsWritten = 0;
-  private readonly quotes = new Map<string, TokenQuote>();
-  private readonly bookFetchAt = new Map<string, number>();
+  private backoffMs = MIN_BACKOFF_MS;
+  private stopped = false;
+  private subscribed = new Set<string>();
+  private tokenSignature = "";
+  private connectDelay: ReturnType<typeof setTimeout> | null = null;
+  lastMessageAt = 0;
+  messages = 0;
 
   constructor(
-    private readonly getTokens: () => MonitoredToken[],
-    private readonly store: Pick<MonitorHub, "recordSnapshot" | "getTokenMeta">,
-    private readonly onEvent?: (message: string) => void
+    readonly index: number,
+    private tokens: string[],
+    private readonly handlers: ShardHandlers
   ) {}
 
-  getStats(): StreamStats {
-    const connected = this.ws?.readyState === WebSocket.OPEN;
-    const stale = connected && Date.now() - this.lastMessageAt >= STALE_MS;
-    return {
-      connected,
-      stale,
-      messages: this.messages,
-      bookEvents: this.bookEvents,
-      snapshotsWritten: this.snapshotsWritten,
-      sampleWrites: 0,
-      lastMessageAt: this.lastMessageAt || null,
-      quotes: new Map(this.quotes),
-    };
+  get tokenIds() {
+    return this.tokens;
   }
 
   isLive() {
     return this.ws?.readyState === WebSocket.OPEN && Date.now() - this.lastMessageAt < STALE_MS;
   }
 
-  sync() {
-    if (this.syncTimer) clearTimeout(this.syncTimer);
-    this.syncTimer = setTimeout(() => {
-      this.syncTimer = null;
-      this.syncNow();
-    }, 250);
+  connected() {
+    return this.ws?.readyState === WebSocket.OPEN;
   }
 
-  stop() {
-    this.stopped = true;
-    if (this.syncTimer) clearTimeout(this.syncTimer);
-    this.syncTimer = null;
-    this.killSocket();
-    if (this.reconnect) clearTimeout(this.reconnect);
-    this.reconnect = null;
-  }
-
-  private syncNow() {
-    if (this.stopped) return;
-    const tokens = this.getTokens();
-    const active = new Set(tokens.map((row) => row.tokenId).filter(Boolean));
-    for (const row of tokens) this.tokenMeta.set(row.tokenId, row);
-    for (const tokenId of [...this.tokenMeta.keys()]) {
-      if (!active.has(tokenId)) this.tokenMeta.delete(tokenId);
-    }
-    for (const tokenId of [...this.bookCache.keys()]) {
-      if (!active.has(tokenId)) this.bookCache.delete(tokenId);
-    }
-    for (const tokenId of [...this.quotes.keys()]) {
-      if (!active.has(tokenId)) this.quotes.delete(tokenId);
-    }
-    for (const tokenId of [...this.lastBookSig.keys()]) {
-      if (!active.has(tokenId)) this.lastBookSig.delete(tokenId);
-    }
-    for (const tokenId of [...this.bookFetchAt.keys()]) {
-      if (!active.has(tokenId)) this.bookFetchAt.delete(tokenId);
-    }
-
-    const ids = [...active].sort();
-    const signature = ids.join(",");
-    if (!ids.length) {
+  setTokens(tokens: string[]) {
+    this.tokens = tokens;
+    const signature = tokens.join(",");
+    if (!tokens.length) {
       this.tokenSignature = "";
-      this.pendingTokens = [];
       this.subscribed.clear();
-      if (this.reconnect) {
-        clearTimeout(this.reconnect);
-        this.reconnect = null;
-      }
       this.killSocket();
       return;
     }
-
-    this.pendingTokens = ids;
-
     if (this.ws?.readyState === WebSocket.OPEN) {
-      if (!this.isLive()) {
-        this.scheduleReconnect("stale socket");
-        return;
-      }
+      // Never kill from setTokens — watchdog handles silence. Sync thrashing
+      // was reconnect-looping every catalog refresh and leaving WSS DOWN.
       if (signature === this.tokenSignature && this.subscribed.size) return;
-      this.patchSubscription(ids, signature);
+      this.patchSubscription(tokens, signature);
       return;
     }
-
     if (this.ws?.readyState === WebSocket.CONNECTING) {
       this.tokenSignature = signature;
       return;
     }
-
-    if (this.reconnect) return;
+    if (this.reconnect) {
+      // Pending reconnect will pick up this.tokens.
+      this.tokenSignature = signature;
+      return;
+    }
     this.tokenSignature = signature;
-    this.connect(ids);
+    this.scheduleConnect(tokens);
+  }
+
+  stop() {
+    this.stopped = true;
+    if (this.reconnect) clearTimeout(this.reconnect);
+    this.reconnect = null;
+    if (this.connectDelay) clearTimeout(this.connectDelay);
+    this.connectDelay = null;
+    this.killSocket();
   }
 
   private patchSubscription(tokens: string[], signature: string) {
@@ -327,6 +307,16 @@ export class OrderbookStream {
     }
   }
 
+  /** Spread opens across shards so we don't open dozens of sockets in one tick. */
+  private scheduleConnect(tokens: string[]) {
+    if (this.connectDelay) clearTimeout(this.connectDelay);
+    const delay = this.index * SHARD_CONNECT_STAGGER_MS;
+    this.connectDelay = setTimeout(() => {
+      this.connectDelay = null;
+      this.connect(tokens);
+    }, delay);
+  }
+
   private connect(tokens: string[]) {
     if (this.stopped) return;
     if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) return;
@@ -336,14 +326,15 @@ export class OrderbookStream {
     this.ignoreClose = false;
 
     ws.on("open", () => {
-      this.backoffMs = 1_000;
+      this.backoffMs = MIN_BACKOFF_MS;
       this.lastMessageAt = Date.now();
-      const live = this.pendingTokens.length ? this.pendingTokens : tokens;
+      const live = this.tokens.length ? this.tokens : tokens;
       this.subscribed = new Set(live);
       this.tokenSignature = live.join(",");
       if (live.length) ws.send(subscribePayload(live));
       this.startHeartbeat(ws);
-      this.onEvent?.(`WSS connected (${live.length} tokens)`);
+      this.handlers.onLog?.(`WSS#${this.index} up (${live.length} tok)`);
+      this.handlers.onConnected?.(live);
     });
 
     ws.on("message", (raw) => {
@@ -355,10 +346,10 @@ export class OrderbookStream {
         const payload = JSON.parse(text) as unknown;
         const events = Array.isArray(payload) ? payload : [payload];
         for (const event of events) {
-          this.apply(event as BookEvent | PriceChangeEvent | BestBidAskEvent);
+          this.handlers.onMessage(event as BookEvent | PriceChangeEvent | BestBidAskEvent);
         }
       } catch (error) {
-        this.onEvent?.(error instanceof Error ? error.message : String(error));
+        this.handlers.onLog?.(error instanceof Error ? error.message : String(error));
       }
     });
 
@@ -369,8 +360,12 @@ export class OrderbookStream {
     ws.on("error", (error) => {
       if (this.ignoreClose) return;
       const msg = error.message;
-      if (/closed before the connection was established/i.test(msg)) return;
-      this.onEvent?.(`WSS error: ${msg}`);
+      if (/closed before the connection was established/i.test(msg)) {
+        this.scheduleReconnect("connect aborted");
+        return;
+      }
+      this.handlers.onLog?.(`WSS#${this.index} error: ${msg}`);
+      this.scheduleReconnect("error");
     });
 
     ws.on("close", () => {
@@ -411,13 +406,13 @@ export class OrderbookStream {
   private scheduleReconnect(reason: string) {
     if (this.stopped) return;
     if (this.reconnect) return;
-    this.onEvent?.(`WSS ${reason}, reconnecting`);
+    this.handlers.onLog?.(`WSS#${this.index} ${reason}, reconnecting`);
     this.killSocket();
-    const delay = this.backoffMs;
+    const delay = this.backoffMs + this.index * 15; // slight jitter per shard
     this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS);
     this.reconnect = setTimeout(() => {
       this.reconnect = null;
-      this.connect(this.pendingTokens);
+      this.connect(this.tokens);
     }, delay);
   }
 
@@ -440,6 +435,180 @@ export class OrderbookStream {
       /* ignore */
     }
   }
+}
+
+export class OrderbookStream {
+  private shards: MarketShard[] = [];
+  private syncTimer: ReturnType<typeof setTimeout> | null = null;
+  private restFallbackTimer: ReturnType<typeof setInterval> | null = null;
+  private restFallbackCursor = 0;
+  private stopped = false;
+  private readonly lastBookSig = new Map<string, string>();
+  private readonly tokenMeta = new Map<string, MonitoredToken>();
+  private readonly bookCache = new Map<string, ParsedBook>();
+  private readonly bookFetchAt = new Map<string, number>();
+  private readonly quotes = new Map<string, TokenQuote>();
+  private bookEvents = 0;
+  private snapshotsWritten = 0;
+  private restInflight = 0;
+  private readonly resyncQueue: string[] = [];
+  private resyncTimer: ReturnType<typeof setInterval> | null = null;
+  private healthTimer: ReturnType<typeof setInterval> | null = null;
+  private wssDeadSince: number | null = null;
+
+  constructor(
+    private readonly getTokens: () => MonitoredToken[],
+    private readonly store: Pick<MonitorHub, "recordSnapshot" | "getTokenMeta">,
+    private readonly onEvent?: (message: string) => void
+  ) {
+    this.restFallbackTimer = setInterval(() => this.restFallbackTick(), REST_FALLBACK_MS);
+    this.resyncTimer = setInterval(() => this.drainResyncQueue(), 200);
+    this.healthTimer = setInterval(() => this.healthTick(), 3_000);
+  }
+
+  getStats(): StreamStats {
+    const liveShards = this.shards.filter((s) => s.isLive()).length;
+    const openShards = this.shards.filter((s) => s.connected()).length;
+    const connected = openShards > 0;
+    const lastMessageAt = this.shards.reduce((max, s) => Math.max(max, s.lastMessageAt), 0);
+    const messages = this.shards.reduce((sum, s) => sum + s.messages, 0);
+    const stale = connected && Date.now() - lastMessageAt >= STALE_MS;
+    return {
+      connected,
+      stale,
+      messages,
+      bookEvents: this.bookEvents,
+      snapshotsWritten: this.snapshotsWritten,
+      sampleWrites: 0,
+      lastMessageAt: lastMessageAt || null,
+      quotes: new Map(this.quotes),
+      shards: this.shards.length,
+      liveShards,
+    };
+  }
+
+  isLive() {
+    return this.shards.some((s) => s.isLive());
+  }
+
+  sync() {
+    if (this.syncTimer) clearTimeout(this.syncTimer);
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = null;
+      this.syncNow();
+    }, 250);
+  }
+
+  stop() {
+    this.stopped = true;
+    if (this.syncTimer) clearTimeout(this.syncTimer);
+    this.syncTimer = null;
+    if (this.restFallbackTimer) clearInterval(this.restFallbackTimer);
+    this.restFallbackTimer = null;
+    if (this.resyncTimer) clearInterval(this.resyncTimer);
+    this.resyncTimer = null;
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = null;
+    this.resyncQueue.length = 0;
+    for (const shard of this.shards) shard.stop();
+    this.shards = [];
+  }
+
+  /** Tear down dead sockets and rebuild — catalog sync alone was leaving WSS DOWN for minutes. */
+  private healthTick() {
+    if (this.stopped) return;
+    const tokens = this.getTokens();
+    if (!tokens.length) {
+      this.wssDeadSince = null;
+      return;
+    }
+    const live = this.shards.some((s) => s.isLive());
+    if (live) {
+      this.wssDeadSince = null;
+      return;
+    }
+    const now = Date.now();
+    if (this.wssDeadSince == null) {
+      this.wssDeadSince = now;
+      return;
+    }
+    if (now - this.wssDeadSince < WSS_DEAD_REBUILD_MS) return;
+    const deadFor = Math.round((now - this.wssDeadSince) / 1000);
+    this.wssDeadSince = now;
+    this.onEvent?.(`WSS dead ${deadFor}s — rebuilding ${this.shards.length} shards`);
+    for (const shard of this.shards) shard.stop();
+    this.shards = [];
+    this.syncNow();
+  }
+
+  private syncNow() {
+    if (this.stopped) return;
+    const tokens = this.getTokens();
+    const active = new Set(tokens.map((row) => row.tokenId).filter(Boolean));
+    for (const row of tokens) this.tokenMeta.set(row.tokenId, row);
+    for (const tokenId of [...this.tokenMeta.keys()]) {
+      if (!active.has(tokenId)) this.tokenMeta.delete(tokenId);
+    }
+    for (const tokenId of [...this.bookCache.keys()]) {
+      if (!active.has(tokenId)) this.bookCache.delete(tokenId);
+    }
+    for (const tokenId of [...this.quotes.keys()]) {
+      if (!active.has(tokenId)) this.quotes.delete(tokenId);
+    }
+    for (const tokenId of [...this.lastBookSig.keys()]) {
+      if (!active.has(tokenId)) this.lastBookSig.delete(tokenId);
+    }
+    for (const tokenId of [...this.bookFetchAt.keys()]) {
+      if (!active.has(tokenId)) this.bookFetchAt.delete(tokenId);
+    }
+
+    const ids = [...active].sort();
+    if (!ids.length) {
+      for (const shard of this.shards) shard.stop();
+      this.shards = [];
+      return;
+    }
+
+    const groups = chunkIds(ids, MAX_ASSETS_PER_WS);
+    while (this.shards.length > groups.length) {
+      this.shards.pop()?.stop();
+    }
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i]!;
+      let shard = this.shards[i];
+      if (!shard) {
+        shard = new MarketShard(i, group, {
+          onMessage: (event) => this.apply(event),
+          onConnected: (tokenIds) => this.queueShardResync(tokenIds),
+          onLog: this.onEvent,
+        });
+        this.shards.push(shard);
+      }
+      shard.setTokens(group);
+    }
+
+    if (groups.length !== this.shards.length) {
+      this.onEvent?.(
+        `WSS sharded ${ids.length} tokens → ${groups.length} sockets (≤${MAX_ASSETS_PER_WS}/ea)`
+      );
+    }
+  }
+
+  /** Drop stale local books and REST-seed after every socket (re)connect. */
+  private queueShardResync(tokenIds: string[]) {
+    for (const id of tokenIds) {
+      this.bookCache.delete(id);
+      if (!this.resyncQueue.includes(id)) this.resyncQueue.push(id);
+    }
+  }
+
+  private drainResyncQueue() {
+    if (this.stopped) return;
+    while (this.restInflight < RESYNC_CONCURRENCY && this.resyncQueue.length) {
+      const tokenId = this.resyncQueue.shift()!;
+      this.maybeRefreshRest(tokenId, true);
+    }
+  }
 
   /** Write only when the book actually changed. No timers, no activity tiers. */
   private recordIfChanged(tokenId: string, bids: BookLevel[], asks: BookLevel[]) {
@@ -450,7 +619,10 @@ export class OrderbookStream {
   }
 
   private async fetchFullBook(tokenId: string) {
-    const res = await polyFetch(`${CLOB_BOOK}?token_id=${encodeURIComponent(tokenId)}`, 8_000);
+    const res = await polyFetch(
+      `${CLOB_BOOK}?token_id=${encodeURIComponent(tokenId)}`,
+      REST_BOOK_TIMEOUT_MS
+    );
     if (!res.ok) return null;
     const body = (await res.json()) as { bids?: Level[]; asks?: Level[] };
     return {
@@ -459,17 +631,19 @@ export class OrderbookStream {
     };
   }
 
+  /**
+   * REST `/book` is the authoritative full ladder. Prefer it over a fat WSS cache —
+   * settlement books are often one-sided/thin (0.1¢ ask, no bids); level-count
+   * preference used to keep the stale mid-game WSS book forever.
+   */
   private pickBook(wss: ParsedBook, rest: ParsedBook | null) {
     if (!rest) return uncrossBook(wss.bids, wss.asks);
     const wssBook = uncrossBook(wss.bids, wss.asks);
     const restBook = uncrossBook(rest.bids, rest.asks);
     const wssBad = isCrossed(wss);
     const restBad = isCrossed(rest);
-    if (wssBad && !restBad) return restBook;
     if (restBad && !wssBad) return wssBook;
-    const wssLevels = wssBook.bids.length + wssBook.asks.length;
-    const restLevels = restBook.bids.length + restBook.asks.length;
-    return restLevels >= wssLevels ? restBook : wssBook;
+    return restBook;
   }
 
   private queueBookWrite(tokenId: string, bids: BookLevel[], asks: BookLevel[]) {
@@ -485,17 +659,54 @@ export class OrderbookStream {
     if (!force && now - lastFetch < REST_REFRESH_MS) return;
     this.bookFetchAt.set(tokenId, now);
     const cached = this.bookCache.get(tokenId);
+    this.restInflight++;
     void this.fetchFullBook(tokenId)
       .then((rest) => {
         if (!rest) return;
         const wss = this.bookCache.get(tokenId) ?? cached;
-        const picked = wss ? this.pickBook(wss, rest) : rest;
+        const picked = wss ? this.pickBook(wss, rest) : uncrossBook(rest.bids, rest.asks);
         this.bookCache.set(tokenId, picked);
         this.recordIfChanged(tokenId, picked.bids, picked.asks);
       })
-      .catch(() => {
-        /* WSS path already handled */
+      .catch((err) => {
+        if (Math.random() < 0.02) {
+          this.onEvent?.(
+            `REST book fail: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      })
+      .finally(() => {
+        this.restInflight = Math.max(0, this.restInflight - 1);
       });
+  }
+
+  /** Keep recording when shards flap — Polymarket books still move on REST. */
+  private restFallbackTick() {
+    if (this.stopped) return;
+    const tokens = this.getTokens();
+    if (!tokens.length) return;
+    const now = Date.now();
+    const wssLive = this.shards.some((s) => s.isLive());
+    const concurrency = wssLive ? REST_FALLBACK_CONCURRENCY : REST_FALLBACK_CONCURRENCY * 2;
+    const staleMs = wssLive ? REST_STALE_TOKEN_MS : 1_500;
+    const slots = Math.max(0, concurrency - this.restInflight);
+    if (!slots) return;
+
+    const stale: { id: string; age: number }[] = [];
+    for (const row of tokens) {
+      const q = this.quotes.get(row.tokenId);
+      const age = q?.lastBookAt != null ? now - q.lastBookAt : Infinity;
+      if (age >= staleMs) stale.push({ id: row.tokenId, age });
+    }
+    if (!stale.length) return;
+    // Oldest books first so one hot token can't starve the rest.
+    stale.sort((a, b) => b.age - a.age);
+
+    for (let i = 0; i < slots && i < stale.length; i++) {
+      const idx = (this.restFallbackCursor + i) % stale.length;
+      this.maybeRefreshRest(stale[idx]!.id, true);
+    }
+    this.restFallbackCursor = (this.restFallbackCursor + slots) % Math.max(1, stale.length);
   }
 
   private writeSnapshot(tokenId: string, bids: BookLevel[], asks: BookLevel[]) {
@@ -504,7 +715,10 @@ export class OrderbookStream {
       return;
     }
     const meta = this.tokenMeta.get(tokenId) ?? this.store.getTokenMeta(tokenId);
-    if (!meta) return;
+    if (!meta) {
+      this.onEvent?.(`snap drop: no meta ${tokenId.slice(0, 12)}…`);
+      return;
+    }
     const bookBids = normalizeBookSide(bids, "bid");
     const bookAsks = normalizeBookSide(asks, "ask");
     const snap: BookSnapshot = {
@@ -520,7 +734,14 @@ export class OrderbookStream {
       asks: bookAsks,
       source: "wss",
     };
-    this.store.recordSnapshot(snap);
+    try {
+      this.store.recordSnapshot(snap);
+    } catch (err) {
+      this.onEvent?.(
+        `snap write fail: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return;
+    }
     this.snapshotsWritten++;
     const prev = this.quotes.get(tokenId);
     this.quotes.set(tokenId, {
@@ -576,7 +797,6 @@ export class OrderbookStream {
       );
       this.bookCache.set(event.asset_id, trimmed);
       this.recordIfChanged(event.asset_id, trimmed.bids, trimmed.asks);
-      // Sizes may be wrong after TOB-only trim — pull full book.
       this.maybeRefreshRest(event.asset_id, true);
     }
   }

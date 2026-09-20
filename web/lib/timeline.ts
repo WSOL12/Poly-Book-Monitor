@@ -77,6 +77,7 @@ export function cropScrubWindow(
 /**
  * Shared scrub bounds for every market on a match.
  * Kickoff→finish (with pads) — not per-token recording edges.
+ * Prematch (tennis open): samples sit before kickoff — use the recorded span.
  */
 export function matchScrubWindow(
   matchStart?: string | null,
@@ -88,15 +89,45 @@ export function matchScrubWindow(
   const sampleLo = sample?.[0]?.capturedAt;
   const sampleHi = sample && sample.length ? sample[sample.length - 1]!.capturedAt : undefined;
 
+  // Open/prematch books land entirely before scheduled start — don't invent a kickoff window.
+  if (
+    Number.isFinite(kickoff) &&
+    sampleLo != null &&
+    sampleHi != null &&
+    sampleHi > sampleLo &&
+    sampleHi < kickoff
+  ) {
+    return { t0: sampleLo, t1: sampleHi };
+  }
+
   if (Number.isFinite(kickoff) && Number.isFinite(finish) && finish > kickoff) {
-    let t1 = finish + 5 * 60_000;
-    // Don't extend past recorded book data when available.
-    if (sampleHi != null) t1 = Math.min(t1, sampleHi);
-    return { t0: kickoff - 5 * 60_000, t1: Math.max(t1, kickoff + 60_000) };
+    // Settlement-only capture: first snap at/after FT — don't invent a 2h kickoff→FT bar.
+    if (
+      sampleLo != null &&
+      sampleHi != null &&
+      sampleHi > sampleLo &&
+      sampleLo >= finish - 3 * 60_000
+    ) {
+      return { t0: sampleLo, t1: sampleHi };
+    }
+    // Late join: scrub the real recorded span (still in-play), not a fake pre-kickoff pad.
+    if (sampleLo != null && sampleHi != null && sampleLo > kickoff + 5 * 60_000) {
+      return { t0: sampleLo, t1: Math.max(sampleHi, finish) };
+    }
+    const t1 = sampleHi != null ? Math.max(sampleHi, finish) : finish + 5 * 60_000;
+    const t0 =
+      sampleLo != null && sampleLo < kickoff - 5 * 60_000
+        ? sampleLo
+        : kickoff - 5 * 60_000;
+    return { t0, t1: Math.max(t1, kickoff + 60_000) };
   }
 
   if (Number.isFinite(kickoff) && sampleHi != null && sampleHi > kickoff) {
-    return { t0: kickoff - 5 * 60_000, t1: sampleHi };
+    const t0 =
+      sampleLo != null && sampleLo < kickoff - 5 * 60_000
+        ? sampleLo
+        : kickoff - 5 * 60_000;
+    return { t0, t1: sampleHi };
   }
 
   if (sampleLo != null && sampleHi != null && sampleHi > sampleLo) {
@@ -140,10 +171,9 @@ function sportMatchBounds(sport?: string | null) {
 
 /**
  * True match end for the scrubber.
- * - `finished_at` is sometimes stamped early (mid-game SUS)
- * - `lastScoreAt` can be hours late (next poll after VFT), so only trust it
- *   inside a plausible post-kickoff window — never stretch the bar to ~5h
- * - Tennis open watch: do NOT invent kickoff+typical end — scrub to last snap
+ * - While still live (no finishedAt): ALWAYS follow lastSnapshotAt — never invent
+ *   kickoff+typical (that froze Man City at 07:45 during 1H while books kept moving).
+ * - After finish: pad with score/typical only when finishedAt is missing or early.
  */
 export function resolveMatchEnd(opts: {
   sport?: string | null;
@@ -162,14 +192,27 @@ export function resolveMatchEnd(opts: {
       ? Number(opts.lastSnapshotAt)
       : NaN;
 
-  // Open tennis (prematch → stop): keep the scrubber on recorded books, not a fake FT.
-  if (opts.sport === "tennis" && !Number.isFinite(finish)) {
+  // Still recording — scrub tip = latest book (tennis open + in-play soccer/MLB/NFL).
+  if (!Number.isFinite(finish)) {
+    if (Number.isFinite(lastSnap) && Number.isFinite(lastScore)) {
+      return Math.max(lastSnap, lastScore);
+    }
     if (Number.isFinite(lastSnap)) return lastSnap;
     if (Number.isFinite(lastScore)) return lastScore;
     return null;
   }
 
-  let end = Number.isFinite(finish) ? finish : NaN;
+  // Canceled/retired tennis before start — prematch data only.
+  if (
+    opts.sport === "tennis" &&
+    Number.isFinite(lastSnap) &&
+    Number.isFinite(kickoff) &&
+    lastSnap < kickoff
+  ) {
+    return lastSnap;
+  }
+
+  let end = finish;
 
   if (Number.isFinite(kickoff) && opts.sport !== "weather") {
     const { typicalMs, maxMs } = sportMatchBounds(opts.sport);
@@ -179,17 +222,19 @@ export function resolveMatchEnd(opts: {
       lastScore - kickoff <= maxMs;
 
     if (scoreUsable) {
-      end = Number.isFinite(end) ? Math.max(end, lastScore) : lastScore;
+      end = Math.max(end, lastScore);
     }
 
-    if (!Number.isFinite(end) || end - kickoff < typicalMs * 0.55) {
-      end = Math.max(Number.isFinite(end) ? end : 0, kickoff + typicalMs);
+    // finishedAt stamped mid-game — extend toward a plausible FT, but never past last book.
+    if (end - kickoff < typicalMs * 0.55) {
+      end = Math.max(end, kickoff + typicalMs);
       if (scoreUsable) end = Math.max(end, lastScore);
     }
 
     end = Math.min(end, kickoff + maxMs);
+    if (Number.isFinite(lastSnap)) end = Math.max(end, lastSnap);
   } else if (Number.isFinite(lastScore)) {
-    end = Number.isFinite(end) ? Math.max(end, lastScore) : lastScore;
+    end = Math.max(end, lastScore);
   }
 
   return Number.isFinite(end) && end > 0 ? end : null;

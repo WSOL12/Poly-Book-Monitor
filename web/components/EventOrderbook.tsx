@@ -126,8 +126,13 @@ export function EventOrderbook({
     queryKey: ["token-history", resolvedId],
     queryFn: () => fetchHistory(resolvedId),
     enabled: Boolean(resolvedId),
-    refetchInterval: eventFinished ? false : 5_000,
-    staleTime: eventFinished ? Infinity : 4_000,
+    // Keep polling briefly after finish — monitor still writes settlement books for ~10m.
+    refetchInterval: () => {
+      if (!eventFinished) return 5_000;
+      if (matchEnd != null && Date.now() - matchEnd < 12 * 60_000) return 5_000;
+      return false;
+    },
+    staleTime: eventFinished && !(matchEnd != null && Date.now() - matchEnd < 12 * 60_000) ? Infinity : 4_000,
     // Keep the scrubber mounted while another market's history loads.
     placeholderData: keepPreviousData,
   });
@@ -162,6 +167,36 @@ export function EventOrderbook({
     [data?.snapshots, matchStart, matchEnd]
   );
   const frames = scrubFrames.length || data?.totalSnapshots || 0;
+  const settlementOnly = useMemo(() => {
+    const snaps = data?.snapshots ?? [];
+    if (snaps.length < 2) return snaps.length > 0;
+    const first = snaps[0]!;
+    const last = snaps[snaps.length - 1]!;
+    // True settlement-only: first snap at/after FT, or essentially one frozen book.
+    if (matchEnd != null && first.capturedAt >= matchEnd - 3 * 60_000) return true;
+    const seen = new Set<string>();
+    for (const s of snaps) {
+      seen.add(`${s.bestBid ?? "x"}/${s.bestAsk ?? "x"}`);
+      if (seen.size > 3) return false;
+    }
+    // Near-certain ladder the whole time (0/1) with almost no TOB movement.
+    const nearSettled = (p: number | null | undefined) =>
+      p != null && Number.isFinite(p) && (p <= 0.02 || p >= 0.98);
+    const allSettled = snaps.every(
+      (s: { bestAsk?: number | null; bestBid?: number | null }) =>
+        nearSettled(s.bestAsk) || nearSettled(s.bestBid)
+    );
+    return allSettled && seen.size <= 3 && last.capturedAt - first.capturedAt < 20 * 60_000;
+  }, [data?.snapshots, matchEnd]);
+
+  const missedKickoffMin = useMemo(() => {
+    const snaps = data?.snapshots ?? [];
+    if (!snaps.length || !matchStart) return 0;
+    const kickoff = Date.parse(matchStart);
+    if (!Number.isFinite(kickoff)) return 0;
+    const lag = snaps[0]!.capturedAt - kickoff;
+    return lag > 5 * 60_000 ? Math.round(lag / 60_000) : 0;
+  }, [data?.snapshots, matchStart]);
   const marketVolume =
     active?.volume != null && active.volume > 0
       ? active.volume
@@ -208,6 +243,18 @@ export function EventOrderbook({
             ) : null}
             {frames.toLocaleString()} frames
           </span>
+          {settlementOnly ? (
+            <span className="poly-missed-banner" title="Monitor was not streaming during in-play">
+              Settlement only — no in-play books
+            </span>
+          ) : missedKickoffMin > 0 ? (
+            <span
+              className="poly-missed-banner"
+              title="Monitor joined after kickoff — early books are missing"
+            >
+              Missed first {missedKickoffMin}m
+            </span>
+          ) : null}
           {weatherPair?.no ? (
             <div className="poly-yn-toggle" role="group" aria-label="Yes or No">
               <button

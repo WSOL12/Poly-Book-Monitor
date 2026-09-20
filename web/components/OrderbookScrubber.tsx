@@ -137,12 +137,10 @@ export function OrderbookScrubber({
     [snapshots, matchStart, matchEnd]
   );
 
-  // Shared match clock — same t0/t1 for moneyline, draw, O/U on this event.
+  // Shared match clock — include frames so prematch (snaps before kickoff) windows correctly.
   const window = useMemo(() => {
-    // Prefer match start/end only so token frame arrays cannot move the bars.
-    const fromMatch = matchScrubWindow(matchStart, matchEnd);
-    if (fromMatch) return fromMatch;
-    return matchScrubWindow(matchStart, matchEnd, frames);
+    if (frames.length) return matchScrubWindow(matchStart, matchEnd, frames);
+    return matchScrubWindow(matchStart, matchEnd);
   }, [matchStart, matchEnd, frames]);
   const t0 = window?.t0 ?? frames[0]?.capturedAt ?? 0;
   const t1 = window?.t1 ?? frames[frames.length - 1]?.capturedAt ?? 0;
@@ -205,17 +203,33 @@ export function OrderbookScrubber({
   useEffect(() => {
     if (!frames.length || !window || initedRef.current) return;
     initedRef.current = true;
+    // Live recording: always ride the tip unless seekAt is an intentional scrub behind tip.
+    if (!startAtBeginning) {
+      const tip = t1;
+      if (seekAt != null && Number.isFinite(seekAt) && seekAt < tip - 2_000) {
+        const at = clamp(seekAt, t0, tip);
+        setAnchorAt(at);
+        setFineAnchorAt(at);
+        setFollowLive(false);
+        return;
+      }
+      setAnchorAt(tip);
+      setFineAnchorAt(tip);
+      setFollowLive(true);
+      return;
+    }
     if (seekAt != null && Number.isFinite(seekAt)) {
       const at = clamp(seekAt, t0, t1);
       setAnchorAt(at);
       setFineAnchorAt(at);
+      setFollowLive(false);
       return;
     }
     const initIdx = pickInitialFrame(frames, startAtBeginning);
     const at = clamp(frames[initIdx]!.capturedAt, t0, t1);
     setAnchorAt(at);
     setFineAnchorAt(at);
-    setFollowLive(!startAtBeginning);
+    setFollowLive(false);
   }, [frames, window, t0, t1, seekAt, startAtBeginning]);
 
   useEffect(() => {
@@ -306,7 +320,14 @@ export function OrderbookScrubber({
   }, [safeIdx, displaySnap?.id, askRows.length, bidRows.length]);
 
   if (!frames.length || !snap || !displaySnap || !window) {
-    return <div className="empty">No orderbook snapshots recorded yet.</div>;
+    return (
+      <div className="empty">
+        No orderbook snapshots recorded for this market.
+        <div className="empty-sub">
+          The match was catalogued but never streamed (monitor was down or the game finished before subscribe).
+        </div>
+      </div>
+    );
   }
 
   const tob = ladderReady && bookQuery.data ? bookQuery.data : snap;
@@ -514,8 +535,11 @@ export function OrderbookScrubber({
 
         <div className="poly-time-grid mono">
           <div className="poly-time-block">
-            <span className="poly-time-label">Match start</span>
-            <span>{kickoff != null ? timelineDateTime(kickoff) : "—"}</span>
+            <span className="poly-time-label">Recorded from</span>
+            <span>{timelineDateTime(t0)}</span>
+            {kickoff != null ? (
+              <span className="poly-time-meta">kickoff {timelineClock(kickoff)}</span>
+            ) : null}
           </div>
           <div className="poly-time-block poly-time-block-center">
             <span className="poly-time-label">Frame</span>
@@ -526,8 +550,11 @@ export function OrderbookScrubber({
             </span>
           </div>
           <div className="poly-time-block poly-time-block-end">
-            <span className="poly-time-label">Match end</span>
-            <span>{matchEnd != null ? timelineDateTime(matchEnd) : "—"}</span>
+            <span className="poly-time-label">Recorded to</span>
+            <span>{timelineDateTime(t1)}</span>
+            {matchEnd != null ? (
+              <span className="poly-time-meta">finished {timelineClock(matchEnd)}</span>
+            ) : null}
           </div>
         </div>
         <div className="poly-time-rail mono">
