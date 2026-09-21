@@ -215,12 +215,12 @@ export class MonitorStore {
     `);
     this.updatePolyStatus = db.prepare(`
       UPDATE ev
-      SET e = @e,
-          l = @l,
-          c = @c,
+      SET e = CASE WHEN e = 1 OR c = 1 THEN 1 ELSE @e END,
+          l = CASE WHEN e = 1 OR c = 1 OR @e = 1 THEN 0 ELSE @l END,
+          c = CASE WHEN c = 1 THEN 1 ELSE @c END,
           gs = @gs,
           fa = CASE
-            WHEN @e = 1 OR @c = 1 THEN COALESCE(@fa, fa)
+            WHEN @e = 1 OR @c = 1 OR e = 1 OR c = 1 THEN COALESCE(@fa, fa)
             ELSE fa
           END,
           u = @u
@@ -285,6 +285,12 @@ export class MonitorStore {
 
   listEventIds() {
     return (this.db.prepare(`SELECT id FROM ev`).all() as Array<{ id: string }>).map((r) => r.id);
+  }
+
+  listOpenEventIds() {
+    return (this.db.prepare(`SELECT id FROM ev WHERE e = 0`).all() as Array<{ id: string }>).map(
+      (r) => r.id
+    );
   }
 
   isArmed(eventId: string) {
@@ -493,6 +499,21 @@ export class MonitorHub {
     return [...this.eventLoc.keys()];
   }
 
+  /** Open (e=0) ids from day DBs — catches orphans that left the in-memory catalog. */
+  listOpenEventIds(sport?: MonitorSport) {
+    const sports = sport ? [sport] : [...SPORTS];
+    const out: string[] = [];
+    for (const s of sports) {
+      for (const day of listDayFiles(s)) {
+        for (const id of this.store(s, day).listOpenEventIds()) {
+          this.eventLoc.set(id, { sport: s, day });
+          out.push(id);
+        }
+      }
+    }
+    return out;
+  }
+
   getEventSport(eventId: string): MonitorSport | null {
     return this.eventLoc.get(eventId)?.sport ?? null;
   }
@@ -538,6 +559,27 @@ export class MonitorHub {
       const [sport, day] = k.split("/") as [MonitorSport, string];
       this.store(sport, day).markEventsFinished(ids, finishedAt);
     }
+  }
+
+  /**
+   * Finish open rows whose books went silent for maxAgeMs (or never recorded).
+   * Used to clear tennis/weather zombies when Gamma open catalog is empty/hung.
+   */
+  scrubSilentOpen(sport: MonitorSport, maxAgeMs: number, now = Date.now()) {
+    const finished: string[] = [];
+    for (const day of listDayFiles(sport)) {
+      const store = this.store(sport, day);
+      for (const id of store.listOpenEventIds()) {
+        this.eventLoc.set(id, { sport, day });
+        const hi = store.raw
+          .prepare(`SELECT MAX(ts) AS hi FROM ob WHERE eid = ?`)
+          .get(id) as { hi: number | null };
+        const age = hi.hi != null ? now - hi.hi : Number.POSITIVE_INFINITY;
+        if (age >= maxAgeMs) finished.push(id);
+      }
+    }
+    if (finished.length) this.markEventsFinished(finished, now);
+    return finished.length;
   }
 
   updatePolyStatuses(rows: PolyEventStatus[]) {

@@ -283,9 +283,10 @@ export function eventSchedule(event: GammaEvent) {
 
 async function fetchTagPages(
   tag: string,
-  opts: { liveOnly: boolean; maxOffset: number }
+  opts: { liveOnly: boolean; maxOffset: number; timeoutMs?: number }
 ): Promise<GammaEvent[]> {
   const out: GammaEvent[] = [];
+  const timeoutMs = opts.timeoutMs ?? 20_000;
   for (let offset = 0; ; offset += 50) {
     const liveQ = opts.liveOnly ? "&live=true" : "";
     const url = `${GAMMA}/events?closed=false&active=true${liveQ}&limit=50&offset=${offset}&tag_slug=${encodeURIComponent(tag)}&order=endDate&ascending=true`;
@@ -293,13 +294,13 @@ async function fetchTagPages(
     let lastErr: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await polyFetch(url, 25_000);
+        const res = await polyFetch(url, timeoutMs);
         if (!res.ok) throw new Error(`Gamma HTTP ${res.status}`);
         page = (await res.json()) as GammaEvent[];
         break;
       } catch (err) {
         lastErr = err;
-        if (attempt < 1) await new Promise((r) => setTimeout(r, 1_000));
+        if (attempt < 1) await new Promise((r) => setTimeout(r, 800));
       }
     }
     if (!page) throw lastErr;
@@ -332,9 +333,11 @@ export async function fetchEventsByTags(tags: string[]): Promise<GammaEvent[]> {
 /** Open (not necessarily live) events — used for weather + tennis prematch. */
 export async function fetchOpenEventsByTags(tags: string[]): Promise<GammaEvent[]> {
   const byId = new Map<string, GammaEvent>();
-  // Keep open dumps small so they can't block the live soccer/MLB catalog for minutes.
+  // One page, short timeout — must not block soccer streaming.
   const results = await Promise.allSettled(
-    tags.map((tag) => fetchTagPages(tag, { liveOnly: false, maxOffset: 150 }))
+    tags.map((tag) =>
+      fetchTagPages(tag, { liveOnly: false, maxOffset: 50, timeoutMs: 8_000 })
+    )
   );
   for (const result of results) {
     if (result.status !== "fulfilled") continue;
@@ -350,10 +353,10 @@ export async function fetchOpenEventsByTags(tags: string[]): Promise<GammaEvent[
 }
 
 export const SPORT_TAGS: Record<MonitorSport, string[]> = {
-  // Primary live tag first — league tags are backup if the umbrella misses a board.
-  soccer: ["soccer", "epl", "mls", "ucl", "liga-mx", "j-league"],
-  football: ["nfl", "ncaa-football", "football"],
-  mlb: ["mlb", "baseball"],
+  // Single live tag — multi-tag fanout filled the HTTP gate and starved WSS reconnects.
+  soccer: ["soccer"],
+  football: ["nfl"],
+  mlb: ["mlb"],
   weather: ["highest-temperature"],
   /** Open ATP/WTA matches; ITF filtered in parsers (seriesSlug / title). */
   tennis: ["tennis"],

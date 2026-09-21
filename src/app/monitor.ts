@@ -15,6 +15,7 @@ import {
 } from "../catalog/gamma.ts";
 import {
   allTokens,
+  streamTokens,
   parseLiveSportEvents,
   parseOpenTennisEvents,
   parseWeatherEvents,
@@ -152,8 +153,11 @@ export async function main() {
       pushLog(`- ${event.sport} ${event.title}${why}`);
     }
 
-    const storedBefore = hub.listEventIds();
-    const dropped = storedBefore.filter((id) => {
+    const storedBefore = new Set([
+      ...hub.listEventIds(),
+      ...[...okSports].flatMap((sport) => hub.listOpenEventIds(sport)),
+    ]);
+    const dropped = [...storedBefore].filter((id) => {
       if (catalogIds.has(id)) return false;
       const sport = hub.getEventSport(id) ?? events.find((e) => e.eventId === id)?.sport;
       // Never finish a sport we failed to refresh this pass.
@@ -223,15 +227,17 @@ export async function main() {
 
     const streaming = [...active, ...graceEvents];
     events = streaming;
-    tokens = allTokens(streaming);
+    const all = allTokens(streaming);
+    tokens = streamTokens(streaming, 128);
     lastCatalogAt = Date.now();
     saveLiveLinks(active);
     stream.sync();
     const soccerN = active.filter((e) => e.sport === "soccer").length;
     const tennisN = active.filter((e) => e.sport === "tennis").length;
     const graceN = graceEvents.length;
+    const clipped = all.length > tokens.length ? ` · clip ${all.length}→${tokens.length}` : "";
     pushLog(
-      `ok ${active.length} live · soccer ${soccerN} · tennis ${tennisN} · ${tokens.length} tok${
+      `ok ${active.length} live · soccer ${soccerN} · tennis ${tennisN} · ${tokens.length} tok${clipped}${
         graceN ? ` · grace ${graceN}` : ""
       } · wx wait ${waiting}`
     );
@@ -296,24 +302,71 @@ export async function main() {
     openRefreshing = true;
     paint();
     try {
-      const settled = await Promise.allSettled(OPEN_SPORTS.map((sport) => fetchOpenSport(sport)));
-      const okSports = new Set<MonitorSport>();
-      const batches: SportBatch[] = [];
-      for (let i = 0; i < settled.length; i++) {
-        const sport = OPEN_SPORTS[i]!;
-        const result = settled[i]!;
-        if (result.status === "fulfilled") {
-          okSports.add(sport);
-          batches.push(result.value);
-          continue;
+      // Fetch independently so tennis timeout doesn't skip weather (and vice versa).
+      for (const sport of OPEN_SPORTS) {
+        try {
+          const batch = await fetchOpenSport(sport);
+          await applyCatalog([batch], new Set<MonitorSport>([sport]), [
+            ...LIVE_SPORTS,
+            ...OPEN_SPORTS.filter((s) => s !== sport),
+          ]);
+          // Belt-and-suspenders: finish any e=0 rows still open for this sport
+          // that were not in the fresh catalog (ITF / vanished / prior zombies).
+          const keep = new Set(batch.events.map((e) => e.eventId));
+          const orphans = hub.listOpenEventIds(sport).filter((id) => !keep.has(id));
+          if (orphans.length) {
+            hub.markEventsFinished(orphans);
+            pushLog(`scrub ${sport} ${orphans.length} orphans`);
+          }
+        } catch (err) {
+          pushLog(
+            `catalog ${sport}: ${err instanceof Error ? err.message : String(err)}`
+          );
+          // Status-sweep known IDs so stopped tennis doesn't linger as e=0 forever.
+          const known = events.filter((e) => e.sport === sport).map((e) => e.eventId);
+          const fromHub = hub.listOpenEventIds(sport);
+          const ids = [...new Set([...known, ...fromHub])].slice(0, 80);
+          if (!ids.length) continue;
+          try {
+            const gammaRows = await fetchEventsByIds(ids);
+            const seen = new Set(gammaRows.map((r) => String(r.id)));
+            hub.updatePolyStatuses(
+              gammaRows.map((row) => {
+                const id = String(row.id);
+                const tennisReason = sport === "tennis" ? tennisStopReason(row) : null;
+                const finished =
+                  sport === "tennis"
+                    ? tennisReason != null || isFinishedGammaEvent(row, { sport })
+                    : isFinishedGammaEvent(row, { sport });
+                return {
+                  eventId: id,
+                  ended: finished,
+                  polyLive: row.live === true && !finished,
+                  closed: row.closed === true,
+                  gameStatus:
+                    sport === "tennis"
+                      ? tennisReason ?? (row.gameStatus?.trim() || null)
+                      : row.gameStatus?.trim() || row.period?.trim() || null,
+                  finishedAt: finished ? finishedAtFromGamma(row, { sport }) ?? Date.now() : null,
+                  score: row.score ?? null,
+                  period: row.period ?? null,
+                  elapsed: row.elapsed ?? null,
+                };
+              })
+            );
+            // Gamma no longer returns the id at all → finish it.
+            const missing = ids.filter((id) => !seen.has(id));
+            if (missing.length) {
+              hub.markEventsFinished(missing);
+              pushLog(`scrub ${sport} ${missing.length} missing`);
+            }
+          } catch (statusErr) {
+            pushLog(
+              `status ${sport}: ${statusErr instanceof Error ? statusErr.message : String(statusErr)}`
+            );
+          }
         }
-        const err = result.reason instanceof Error ? result.reason.message : String(result.reason);
-        pushLog(`catalog ${sport}: ${err}`);
-        const kept = events.filter((e) => e.sport === sport);
-        if (kept.length) batches.push({ sport, events: kept });
       }
-      if (!okSports.size) return;
-      await applyCatalog(batches, okSports, LIVE_SPORTS);
     } catch (error) {
       pushLog(`catalog open: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -323,15 +376,34 @@ export async function main() {
 
   await refreshLiveCatalog();
   paint();
-  void refreshOpenCatalog().then(paint);
+  // Clear silent tennis/weather zombies immediately — don't wait on Gamma.
+  for (const sport of OPEN_SPORTS) {
+    const n = hub.scrubSilentOpen(sport, 60 * 60_000);
+    if (n) pushLog(`scrub ${sport} ${n} silent>1h`);
+  }
+  // Defer open catalog until WSS is up — Gamma timeouts starve handshakes.
+  const openKick = setInterval(() => {
+    if (!stream.isLive()) return;
+    clearInterval(openKick);
+    void refreshOpenCatalog().then(paint);
+  }, 5_000);
+  setTimeout(() => clearInterval(openKick), 120_000);
 
   const liveTimer = setInterval(() => {
+    // Gamma catalog dumps compete with WSS handshakes — wait until sockets are live.
+    if (!stream.isLive() && tokens.length > 0) return;
     void refreshLiveCatalog().then(paint);
   }, CATALOG_REFRESH_MS);
 
   const openTimer = setInterval(() => {
+    for (const sport of OPEN_SPORTS) {
+      const n = hub.scrubSilentOpen(sport, 60 * 60_000);
+      if (n) pushLog(`scrub ${sport} ${n} silent>1h`);
+    }
+    // Don't pile Gamma open dumps on top of a dead WSS — reconnect first.
+    if (!stream.isLive()) return;
     void refreshOpenCatalog().then(paint);
-  }, Math.max(CATALOG_REFRESH_MS * 2, 60_000));
+  }, Math.max(CATALOG_REFRESH_MS * 3, 90_000));
 
   const consoleTimer = setInterval(paint, CONSOLE_REFRESH_MS);
 

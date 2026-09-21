@@ -961,3 +961,25 @@ export function allTokens(events: MonitoredEvent[]): MonitoredToken[] {
   }
   return [...byId.values()];
 }
+
+/**
+ * WSS dies quietly past ~10–12 sockets. Prefer moneylines/weather, then fill
+ * remaining capacity with other markets (totals, spreads, tennis props).
+ */
+export function streamTokens(events: MonitoredEvent[], maxTokens = 320): MonitoredToken[] {
+  const primary: MonitoredToken[] = [];
+  const secondary: MonitoredToken[] = [];
+  const seen = new Set<string>();
+  for (const event of events) {
+    for (const market of event.markets) {
+      for (const row of market.tokens) {
+        if (seen.has(row.tokenId)) continue;
+        seen.add(row.tokenId);
+        if (row.marketType === "moneyline" || row.marketType === "weather") primary.push(row);
+        else secondary.push(row);
+      }
+    }
+  }
+  if (primary.length >= maxTokens) return primary.slice(0, maxTokens);
+  return [...primary, ...secondary.slice(0, maxTokens - primary.length)];
+}
