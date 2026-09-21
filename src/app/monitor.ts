@@ -1,6 +1,7 @@
 import {
   CATALOG_REFRESH_MS,
   CONSOLE_REFRESH_MS,
+  DATA_DIR,
   POST_FINISH_GRACE_MS,
   WEATHER_ARM_PRICE,
 } from "../config/env.ts";
@@ -25,6 +26,8 @@ import { OrderbookStream } from "../stream/orderbookStream.ts";
 import { saveLiveLinks } from "../infra/links.ts";
 import { paintConsole, restoreConsole } from "../ui/console.ts";
 import type { MonitoredEvent, MonitoredToken, MonitorSport } from "../types/monitoring.ts";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { resolve } from "node:path";
 
 /** Live boards — refresh first so soccer isn't blocked by weather/tennis dumps. */
 const LIVE_SPORTS: MonitorSport[] = ["soccer", "football", "mlb"];
@@ -32,11 +35,46 @@ const OPEN_SPORTS: MonitorSport[] = ["weather", "tennis"];
 /** Sports where markets keep trading after Gamma flips live=false / FINAL. */
 const SETTLEMENT_GRACE_SPORTS = new Set<MonitorSport>(["soccer", "football", "mlb"]);
 const eventLog: string[] = [];
+const LOCK_PATH = resolve(DATA_DIR, "monitor.lock");
 
 function pushLog(message: string) {
   const line = `[${new Date().toISOString().slice(11, 19)}] ${message}`;
   eventLog.push(line);
   if (eventLog.length > 8) eventLog.shift();
+}
+
+/** Prevent dozens of zombie monitors from starving WSS (seen repeatedly). */
+function acquireMonitorLock() {
+  mkdirSync(DATA_DIR, { recursive: true });
+  if (existsSync(LOCK_PATH)) {
+    const raw = readFileSync(LOCK_PATH, "utf8").trim();
+    const pid = Number(raw);
+    if (Number.isFinite(pid) && pid > 0) {
+      try {
+        process.kill(pid, 0);
+        console.error(
+          `Another monitor is already running (pid ${pid}).\n` +
+            `Stop it first, or delete ${LOCK_PATH} if it's stale.`
+        );
+        process.exit(1);
+      } catch {
+        // ESRCH — stale lock
+      }
+    }
+  }
+  writeFileSync(LOCK_PATH, String(process.pid));
+  const release = () => {
+    try {
+      if (existsSync(LOCK_PATH) && readFileSync(LOCK_PATH, "utf8").trim() === String(process.pid)) {
+        unlinkSync(LOCK_PATH);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+  process.on("exit", release);
+  process.on("SIGINT", release);
+  process.on("SIGTERM", release);
 }
 
 function weatherReady(event: MonitoredEvent, armed: Set<string>) {
@@ -62,6 +100,7 @@ async function fetchOpenSport(sport: MonitorSport): Promise<SportBatch> {
 }
 
 export async function main() {
+  acquireMonitorLock();
   const hub = new MonitorHub();
   const recovered = hub.armWeatherThatAlreadyHasBooks();
   if (recovered) pushLog(`re-arm ${recovered} weather already on disk`);
@@ -228,7 +267,7 @@ export async function main() {
     const streaming = [...active, ...graceEvents];
     events = streaming;
     const all = allTokens(streaming);
-    tokens = streamTokens(streaming, 128);
+    tokens = streamTokens(streaming, 120);
     lastCatalogAt = Date.now();
     saveLiveLinks(active);
     stream.sync();
