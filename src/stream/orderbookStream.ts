@@ -12,18 +12,19 @@ const WATCH_MS = 3_000;
 /** Grace after socket open before stale watchdog can kill (initial_dump lag). */
 const OPEN_GRACE_MS = 20_000;
 /** Abort hung TCP/TLS handshakes — otherwise shards stick in CONNECTING forever. */
-const CONNECT_TIMEOUT_MS = 30_000;
+const CONNECT_TIMEOUT_MS = 25_000;
 /** First reconnect attempt — keep gaps short. */
 const MIN_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 30_000;
-/** Stagger shard connects so Polymarket doesn't refuse a burst. */
-const SHARD_CONNECT_STAGGER_MS = 800;
-/** Keep sockets small — large asset lists die quietly. */
-const MAX_ASSETS_PER_WS = 40;
-/** Full shard rebuild only after sustained death — don't thrash mid-reconnect. */
-const WSS_DEAD_REBUILD_MS = 300_000;
-/** Hard cap on concurrent market sockets — past ~4 Polymarket gets flaky here. */
-const MAX_SHARDS = 3;
+/** Keep the asset list modest — huge lists die quietly on Polymarket. */
+const MAX_ASSETS_PER_WS = 80;
+/** Full rebuild only after sustained death — don't thrash mid-reconnect. */
+const WSS_DEAD_REBUILD_MS = 120_000;
+/**
+ * One market socket. Multi-shard connect storms caused day-long LIVE 1/N
+ * with perpetual "connect timeout" on Windows.
+ */
+const MAX_SHARDS = 1;
 
 /** Only one TCP/TLS handshake at a time — parallel connects time out on Windows. */
 let connectChain: Promise<void> = Promise.resolve();

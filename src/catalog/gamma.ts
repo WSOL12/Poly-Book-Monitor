@@ -333,10 +333,10 @@ export async function fetchEventsByTags(tags: string[]): Promise<GammaEvent[]> {
 /** Open (not necessarily live) events — used for weather + tennis prematch. */
 export async function fetchOpenEventsByTags(tags: string[]): Promise<GammaEvent[]> {
   const byId = new Map<string, GammaEvent>();
-  // One page, short timeout — must not block soccer streaming.
+  // One page; 15s — 8s was aborting tennis behind the HTTP gate during weather dumps.
   const results = await Promise.allSettled(
     tags.map((tag) =>
-      fetchTagPages(tag, { liveOnly: false, maxOffset: 50, timeoutMs: 8_000 })
+      fetchTagPages(tag, { liveOnly: false, maxOffset: 50, timeoutMs: 15_000 })
     )
   );
   for (const result of results) {
