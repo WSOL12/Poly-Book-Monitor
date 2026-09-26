@@ -1,4 +1,7 @@
 import type { MonitorSport } from "../types/monitoring.ts";
+import { httpGetJson } from "../utils/http.ts";
+
+const GAMMA = "https://gamma-api.polymarket.com";
 
 export type GammaMarket = {
   id?: string;
@@ -341,7 +344,10 @@ export function eventSchedule(event: GammaEvent) {
   return { startTime, eventDate };
 }
 
-/** Tag slugs used when listing events via Predexon (see src/predexon/catalog.ts). */
+/**
+ * Polymarket Gamma tags for catalog discovery.
+ * Predexon sport tags are polluted with futures — discover via Gamma, download books via Predexon.
+ */
 export const SPORT_TAGS: Record<MonitorSport, string[]> = {
   soccer: ["soccer"],
   football: ["nfl"],
@@ -349,3 +355,92 @@ export const SPORT_TAGS: Record<MonitorSport, string[]> = {
   weather: ["highest-temperature"],
   tennis: ["tennis"],
 };
+
+function eventTimeMs(event: GammaEvent): number | null {
+  for (const raw of [event.startTime, event.endDate, event.eventDate, event.finishedTimestamp]) {
+    if (!raw) continue;
+    const t = Date.parse(raw.length === 10 ? `${raw}T12:00:00Z` : raw);
+    if (Number.isFinite(t)) return t;
+  }
+  const fromSlug = /(\d{4}-\d{2}-\d{2})/.exec(event.slug ?? "")?.[1];
+  if (fromSlug) {
+    const t = Date.parse(`${fromSlug}T12:00:00Z`);
+    if (Number.isFinite(t)) return t;
+  }
+  return null;
+}
+
+export function eventInTimeWindow(event: GammaEvent, fromMs: number, toMs: number): boolean {
+  const t = eventTimeMs(event);
+  if (t == null) return true;
+  return t >= fromMs && t <= toMs;
+}
+
+async function fetchTagPages(
+  tag: string,
+  opts: { closed: boolean; liveOnly?: boolean; maxPages?: number; timeoutMs?: number },
+): Promise<GammaEvent[]> {
+  const out: GammaEvent[] = [];
+  const maxPages = opts.maxPages ?? 8;
+  const timeoutMs = opts.timeoutMs ?? 25_000;
+  for (let page = 0; page < maxPages; page++) {
+    const offset = page * 50;
+    const liveQ = opts.liveOnly ? "&live=true" : "";
+    const closedQ = opts.closed ? "closed=true" : "closed=false&active=true";
+    const order = opts.closed ? "endDate&ascending=false" : "startTime&ascending=true";
+    const url = `${GAMMA}/events?${closedQ}${liveQ}&limit=50&offset=${offset}&tag_slug=${encodeURIComponent(tag)}&order=${order}`;
+    const pageRows = await httpGetJson<GammaEvent[]>(url, { timeoutMs });
+    if (!Array.isArray(pageRows) || pageRows.length === 0) break;
+    out.push(...pageRows);
+    if (pageRows.length < 50) break;
+  }
+  return out;
+}
+
+export type GammaCatalogOpts = {
+  sport: MonitorSport;
+  status: "open" | "closed" | "both";
+  fromMs: number;
+  toMs: number;
+  limit?: number | null;
+};
+
+/** Discover sports events from Gamma (reliable match catalog). */
+export async function fetchSportCatalog(opts: GammaCatalogOpts): Promise<GammaEvent[]> {
+  const tags = SPORT_TAGS[opts.sport];
+  const byId = new Map<string, GammaEvent>();
+
+  const wantOpen = opts.status === "open" || opts.status === "both";
+  const wantClosed = opts.status === "closed" || opts.status === "both";
+
+  const jobs: Array<Promise<GammaEvent[]>> = [];
+  for (const tag of tags) {
+    if (wantOpen) {
+      jobs.push(fetchTagPages(tag, { closed: false, liveOnly: true, maxPages: 4 }));
+      jobs.push(fetchTagPages(tag, { closed: false, liveOnly: false, maxPages: 6 }));
+    }
+    if (wantClosed) {
+      jobs.push(fetchTagPages(tag, { closed: true, maxPages: 10 }));
+    }
+  }
+
+  const results = await Promise.allSettled(jobs);
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    for (const event of result.value) {
+      if (!event?.id) continue;
+      if (!eventInTimeWindow(event, opts.fromMs, opts.toMs)) continue;
+      byId.set(String(event.id), event);
+    }
+  }
+
+  let out = [...byId.values()];
+  // Prefer real kickoff times; do not hard-limit here — download.ts limits after parse
+  // so prop-only siblings don't crowd out moneyline matches.
+  out.sort((a, b) => (eventTimeMs(b) ?? 0) - (eventTimeMs(a) ?? 0));
+  if (opts.limit != null && out.length > opts.limit * 8) {
+    // Soft cap raw fanout to keep Gamma calls sane when limit is tiny.
+    out = out.slice(0, Math.max(opts.limit * 8, 40));
+  }
+  return out;
+}

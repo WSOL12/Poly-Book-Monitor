@@ -1,17 +1,16 @@
 /**
  * Download recorded Polymarket orderbooks from Predexon into data/{sport}/{YYYY-MM}.db.
  *
+ * Catalog = Polymarket Gamma (real match events).
+ * Books   = Predexon /v2/polymarket/orderbooks by token_id.
+ *
  *   npm run download
- *   npm run download -- --sports soccer,mlb --days 2
- *   npm run download -- --status closed --from 2026-09-20 --to 2026-09-25
- *   npm run download -- --force   # ignore dl.complete and re-fetch
- *
- * Re-download protect (same idea as compare-poly-predict markets.complete):
- *   dl.complete=1 → skip event on re-run unless --force
- *
- * Free orderbook history: https://docs.predexon.com/api-reference/markets/orderbooks
+ *   npm run history
+ *   npm run download -- --sports soccer --days 2 --limit 5
+ *   npm run download -- --force
  */
 import { SPORTS, type EnvSport } from "../config/env.ts";
+import { fetchSportCatalog, SPORT_TAGS } from "../catalog/gamma.ts";
 import { allTokens, parseHistorySportEvents } from "../catalog/parsers.ts";
 import {
   bestOf,
@@ -20,11 +19,6 @@ import {
   MonitorHub,
   normalizeBookSide,
 } from "../db/store.ts";
-import {
-  hydrateEventMarkets,
-  listSportEvents,
-  SPORT_TAGS,
-} from "../predexon/catalog.ts";
 import { maskApiKey, parseApiKeysFromEnv, type PredexonClientOptions } from "../predexon/client.ts";
 import { fetchPolyOrderbooks } from "../predexon/orderbooks.ts";
 import type { BookSnapshot, MonitoredEvent, MonitorSport } from "../types/monitoring.ts";
@@ -284,29 +278,31 @@ async function downloadEvent(
 }
 
 async function runSport(opts: Options, hub: MonitorHub, sport: MonitorSport) {
-  console.log(`\n=== ${sport} (tags: ${SPORT_TAGS[sport].join(", ")}) ===`);
-  const gammaEvents = await listSportEvents(opts.client, {
+  console.log(`\n=== ${sport} (gamma tags: ${SPORT_TAGS[sport].join(", ")}) ===`);
+  // Catalog from Gamma (real matches). Orderbooks from Predexon by token_id.
+  const gammaEvents = await fetchSportCatalog({
     sport,
     status: opts.status,
     fromMs: opts.fromMs,
     toMs: opts.toMs,
     limit: opts.eventLimit,
   });
-  console.log(`  catalog: ${gammaEvents.length} raw events from Predexon`);
+  console.log(`  catalog: ${gammaEvents.length} raw events from Gamma`);
 
-  const hydrated = await mapPool(gammaEvents, Math.min(4, opts.concurrency), async (ev) => {
-    if ((ev.markets?.length ?? 0) >= 45 || ((ev.markets?.length ?? 0) === 0 && ev.slug)) {
-      return hydrateEventMarkets(opts.client, ev);
-    }
-    return ev;
-  });
-
-  const parsed = parseHistorySportEvents(sport, hydrated);
-  console.log(`  parsed: ${parsed.length} events with tradeable markets`);
+  const parsedAll = parseHistorySportEvents(sport, gammaEvents);
+  const parsed =
+    opts.eventLimit != null ? parsedAll.slice(0, opts.eventLimit) : parsedAll;
+  console.log(`  parsed: ${parsed.length} events with tradeable markets` +
+    (parsedAll.length !== parsed.length ? ` (of ${parsedAll.length})` : ""));
+  if (gammaEvents.length > 0 && parsedAll.length === 0) {
+    const sample = gammaEvents.slice(0, 3).map((e) => e.title);
+    console.log(`  ! parse dropped all — sample titles: ${sample.join(" | ")}`);
+  }
 
   let downloaded = 0;
   let skipped = 0;
   let errors = 0;
+  let snapTotal = 0;
 
   await mapPool(parsed, opts.concurrency, async (event) => {
     const month = monthForEvent(event);
@@ -317,7 +313,8 @@ async function runSport(opts: Options, hub: MonitorHub, sport: MonitorSport) {
         console.log(`  · skip ${month} ${event.title.slice(0, 60)}`);
       } else {
         downloaded++;
-        console.log(`  ✓ ${month} ${event.title.slice(0, 60)}`);
+        const toks = allTokens([event]).length;
+        console.log(`  ✓ ${month} ${event.title.slice(0, 55)}  tokens=${toks}`);
       }
     } catch (error) {
       errors++;

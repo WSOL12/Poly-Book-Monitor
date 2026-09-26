@@ -28,15 +28,12 @@ Dashboard: http://127.0.0.1:9000 (or the port Next prints).
 
 ## How it works
 
-| Step | Predexon API |
-|------|----------------|
-| List events by sport tag | [`GET /v2/polymarket/events/keyset`](https://docs.predexon.com/api-reference/markets/events) |
-| Deep market list (when needed) | [`GET /v2/polymarket/markets/keyset`](https://docs.predexon.com/api-reference/markets/list-markets) |
-| Orderbook snapshots | [`GET /v2/polymarket/orderbooks`](https://docs.predexon.com/api-reference/markets/orderbooks) (free & unlimited; from 2026-01-01) |
+| Step | Source |
+|------|--------|
+| Discover match events | **Polymarket Gamma** (`/events` by sport tag) |
+| Orderbook snapshots | **Predexon** [`/v2/polymarket/orderbooks`](https://docs.predexon.com/api-reference/markets/orderbooks) by `token_id` |
 
-Auth header: `x-api-key` ([docs](https://docs.predexon.com/authentication)).
-
-Rate lanes + multi-key round-robin match the downloader in `compare poly-predict` (`history-download.ts`).
+Predexon sport tags alone are full of futures/outrights (not live matches). Gamma is the match catalog; Predexon is the recorded book history (from 2026-01-01).
 
 ## Storage
 

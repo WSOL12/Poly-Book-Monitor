@@ -441,16 +441,23 @@ function parseTotalsForMatch(
 
 function isMatchTitle(title: string, sport: MonitorSport) {
   if (!/ vs\.? /i.test(title)) return false;
-  if (/\b(total corners?|corners?|cards?|bookings?|shots?|offsides?|penalt(y|ies)|player props?|anytime scorer|first goal scorer)\b/i.test(title)) {
+  if (
+    /\b(total corners?|corners?|cards?|bookings?|shots?|offsides?|penalt(y|ies)|player props?|anytime scorer|first goal scorer|first touchdown|announcers?|more markets|halftime result|second half|exact score|team to score)\b/i.test(
+      title,
+    )
+  ) {
     return false;
   }
+  // Prop event titles: "X vs Y - Player Props", "What will … during the X vs Y game?"
+  if (/\bvs\.?\b.+\b(player props?|touchdown|announcer)/i.test(title)) return false;
+  if (/^what will\b/i.test(title)) return false;
   if (sport === "soccer") {
     if (/\b(halftime|second half|exact score|more markets|winner|outright|golden boot|ballon)\b/i.test(title)) {
       return false;
     }
   }
   if (sport === "football") {
-    if (/\b(player props?|mvp|outright|draft|season|super bowl champion|win the 20\d\d)\b/i.test(title)) {
+    if (/\b(player props?|mvp|outright|draft|season series|super bowl champion|win the 20\d\d)\b/i.test(title)) {
       return false;
     }
   }
