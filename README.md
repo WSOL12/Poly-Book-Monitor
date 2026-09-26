@@ -1,199 +1,83 @@
 # Poly Monitor
 
+Downloads **recorded** Polymarket orderbook history from [Predexon](https://docs.predexon.com/) into local SQLite. No live WebSocket monitoring.
 
-
-Real-time Polymarket orderbook recorder for **live** soccer, football (NFL), MLB matches, **open** tennis (ATP/WTA), and **highest-temperature** weather markets across cities.
-
-
-
-The monitor watches **in-play / live** ball sports (`live=true` on Polymarket), **open prematch tennis** until the match starts / cancels / retires (ITF skipped), and weather cities once a Yes bucket arms. It stores orderbook snapshots in local SQLite. A Next.js dashboard lets you review bid/ask movement later.
-
-
-
-BC.GAME integration has been removed.
-
-
-
-## Sports covered
-
-
-
-| Sport | Polymarket tags | Watch mode |
-
-|-------|-----------------|------------|
-
-| Soccer | soccer, epl, la-liga, bundesliga, serie-a, ligue-1, mls, ucl, and more | Live only |
-
-| Football | nfl, ncaa-football, football | Live only |
-
-| MLB | mlb, baseball, npb, kbo | Live only |
-
-| Tennis | tennis (ATP / WTA / doubles; **no ITF**) | Open prematch → stop on started / canceled / retired |
-
-| Weather | highest-temperature (all cities, daily buckets) | Open; arm at 60¢ Yes |
-
-
-
-Tennis stop reasons are written to `ev.gs` as `started`, `canceled`, or `retired`. Cancel/retire are detected via Gamma period (`CAN`) and void moneyline prices (~50/50).
-
-Per tennis match we record Polymarket’s real market set (not a flat dump of O/Us):
-
-| Type | Example |
-|------|---------|
-| Moneyline | Match winner |
-| Set winner | Set 1 / Set 2 winner |
-| Completed match | Yes/No |
-| Totals | S1 Games O/U, S2 Games O/U, Match O/U, Sets O/U |
-| Handicaps | Set handicap, game spread |
-
-
+Covers soccer, football (NFL), MLB, tennis (ATP/WTA; ITF skipped), and highest-temperature weather markets. The Next.js dashboard reads the same day DBs as before.
 
 ## Quick start
 
-
+1. Get an API key at [dashboard.predexon.com](https://dashboard.predexon.com).
+2. Configure `.env`:
 
 ```bash
+cp .env.example .env
+# set PREDEXON_API_KEY=...
+```
 
+3. Download history, then open the dashboard:
+
+```bash
 npm install
-
-cp .env.example .env   # optional
-
-
-
-# Terminal 1 — start the monitor
-
-npm run monitor
-
-
-
-# Terminal 2 — open the dashboard
+npm run download
+# optional: npm run download -- --sports soccer --days 2 --status closed
 
 cd web && npm install && npm run dev
-
 ```
 
+Dashboard: http://127.0.0.1:9000 (or the port Next prints).
 
+## How it works
 
-Dashboard: http://127.0.0.1:3000
+| Step | Predexon API |
+|------|----------------|
+| List events by sport tag | [`GET /v2/polymarket/events/keyset`](https://docs.predexon.com/api-reference/markets/events) |
+| Deep market list (when needed) | [`GET /v2/polymarket/markets/keyset`](https://docs.predexon.com/api-reference/markets/list-markets) |
+| Orderbook snapshots | [`GET /v2/polymarket/orderbooks`](https://docs.predexon.com/api-reference/markets/orderbooks) (free & unlimited; from 2026-01-01) |
 
+Auth header: `x-api-key` ([docs](https://docs.predexon.com/authentication)).
 
+Rate lanes + multi-key round-robin match the downloader in `compare poly-predict` (`history-download.ts`).
 
-## What gets recorded
+## Storage
 
-
-
-- **Moneyline** tokens (home / away / draw for soccer; players for tennis)
-
-- **All match total O/U** markets (multiple lines per game)
-
-- Full orderbook depth (all bid/ask levels from WSS level 2)
-
-- Best bid / ask updates between full books
-
-
-
-Data is stored as **one SQLite file per sport per day**:
-
-
+Monthly shards (same idea as compare-poly-predict history DBs):
 
 ```
-
-data/
-
-  mlb/
-
-    _idx.db
-
-    2026-09-16.db
-
-    2026-09-17.db
-
-  soccer/
-
-    _idx.db
-
-    2026-09-16.db
-
-  football/
-
-    ...
-
-  tennis/
-
-    ...
-
-  weather/
-
-    ...
-
+data/{soccer|football|mlb|tennis|weather}/
+  _idx.db
+  YYYY-MM.db    # ev / mk / tk / ob / sc / dl
 ```
 
+`dl.complete=1` marks a finished download — re-runs **skip** that event unless you pass `--force`.
 
+## CLI
 
-Day = event date (`eventDate` / kickoff day). Schema uses short columns (`ob.tid/ts/bb/ba/bj/aj`) and compact JSON `{p,s}`.
+```bash
+npm run download -- --sports soccer,mlb --days 1
+npm run download -- --from 2026-09-20 --to 2026-09-25 --status closed
+npm run download -- --limit 5 --force
+npm run download -- --delay-ms 1100   # free-plan friendly
+```
 
-
-
-Legacy `data/monitoring.db` and flat `data/*.db` are no longer written.
-
-
-
-Live Polymarket URLs are exported to `data/live-links.json` on every catalog refresh (~15s).
-
-
-
-## Configuration
-
-
-
-| Variable | Default | Description |
-
-|----------|---------|-------------|
-
-| `CATALOG_REFRESH_MS` | `15000` | How often to poll Polymarket for new markets |
-
-| `DATA_DIR` | `./data` | Directory for per-sport `*.db` files |
-
-| `MONITOR_ROOT` | `..` (from web/) | Project root for the dashboard |
-
-
-
-## Dashboard pages
-
-
-
-- `/` — all events with snapshot stats
-
-- `/soccer`, `/football`, `/mlb`, `/tennis`, `/weather` — sport filters
-
-- `/event/[eventId]` — markets and live quotes per match
-
-- `/token/[tokenId]` — bid/ask chart and latest depth
-
-
+| Flag / env | Description |
+|------------|-------------|
+| `--sports` / `DOWNLOAD_SPORTS` | Comma list of sports |
+| `--status` / `DOWNLOAD_STATUS` | `open`, `closed`, or `both` |
+| `--days` / `DOWNLOAD_DAYS` | Lookback window when `--from` unset |
+| `--from` `--to` | ISO date or unix |
+| `--delay-ms` / `PREDEXON_REQUEST_DELAY_MS` | Gap between requests per key lane |
+| `--concurrency` / `DOWNLOAD_CONCURRENCY` | Parallel events |
+| `--limit` / `DOWNLOAD_LIMIT` | Cap events per sport |
+| `--force` | Wipe `ob` + ignore `dl.complete`, re-download |
+| `dl.complete=1` | Auto-skip settled events on re-run (like the compare bot) |
 
 ## Project layout
 
-
-
 ```
-
 src/
-
-  app/monitor.ts      # main loop
-
-  catalog/            # Polymarket Gamma API + parsers
-
-  stream/             # CLOB WebSocket orderbook feed
-
-  db/                 # SQLite schema + writes
-
-web/                  # Next.js dashboard (reads SQLite)
-
-data/{sport}/{YYYY-MM-DD}.db   # per-sport, per-day databases
-
-data/{sport}/_idx.db           # event/token → day index
-
+  app/download.ts     # entry: catalog → orderbooks → SQLite
+  predexon/           # Predexon HTTP client + events + orderbooks
+  catalog/            # market parsers (moneyline / O/U / tennis / weather)
+  db/store.ts         # day DB schema + writers
+web/                  # Next.js reviewer UI
 ```
-
-

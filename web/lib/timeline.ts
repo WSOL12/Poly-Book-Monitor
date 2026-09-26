@@ -5,7 +5,7 @@ export type HistoryTimeline = {
   at: number[];
   bestBid: Array<number | null>;
   bestAsk: Array<number | null>;
-  /** Per-row day shard (YYYY-MM-DD), required for per-day DB lookup. */
+  /** Per-row shard (YYYY-MM), required for monthly DB lookup. */
   day?: string[];
 };
 

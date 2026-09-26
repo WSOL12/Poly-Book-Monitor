@@ -100,6 +100,8 @@ export function MatchScoreboard({
   live,
   ended,
   closed,
+  sport,
+  gameStatus,
   atMs,
   scoreHistory = [],
 }: {
@@ -108,6 +110,9 @@ export function MatchScoreboard({
   live: boolean;
   ended: boolean;
   closed: boolean;
+  /** Soccer-only goals strip; other sports never show "goal times". */
+  sport?: string | null;
+  gameStatus?: string | null;
   atMs?: number;
   scoreHistory?: Array<{ capturedAt: number; score: string | null; period: string | null; elapsed: string | null }>;
 }) {
@@ -128,8 +133,12 @@ export function MatchScoreboard({
 
   const parsed = useMemo(() => parseScoreString(scoreStr), [scoreStr]);
   const { home, away } = useMemo(() => teamRows(sports?.teams, title), [sports?.teams, title]);
-  const badge = periodBadge({ period, elapsed, live, ended, closed });
-  const goals = useMemo(() => inferGoalsFromHistory(scoreHistory), [scoreHistory]);
+  const badge = periodBadge({ period, elapsed, live, ended, closed, gameStatus });
+  const showGoals = sport === "soccer";
+  const goals = useMemo(
+    () => (showGoals ? inferGoalsFromHistory(scoreHistory) : []),
+    [showGoals, scoreHistory]
+  );
   const sparseHistory = scoreHistory.length > 0 && goals.length === 0
     ? false
     : scoreHistory.length <= 1 && (parsed?.homeTotal ?? 0) + (parsed?.awayTotal ?? 0) > 0;
@@ -146,14 +155,14 @@ export function MatchScoreboard({
   const activeSetIdx = parsed?.mode === "sets" ? setCount - 1 : -1;
   const homeLabel = home.alias || home.name;
   const awayLabel = away.alias || away.name;
-  const goalsUi = (
+  const goalsUi = showGoals ? (
     <GoalsStrip
       goals={onlyFinalDump ? [] : goals}
       homeName={homeLabel}
       awayName={awayLabel}
       sparse={sparseHistory || onlyFinalDump}
     />
-  );
+  ) : null;
 
   if (parsed?.mode === "sets") {
     return (

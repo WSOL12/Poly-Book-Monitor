@@ -86,9 +86,9 @@ export function eventResultLabel(event: {
   if (event.sport === "weather") return event.winTemp?.trim() || null;
   if (event.sport === "tennis") {
     const gs = event.gameStatus?.trim().toLowerCase() ?? "";
-    if (gs === "started") return "STARTED";
     if (gs === "canceled" || gs === "cancelled") return "CANCELED";
     if (gs === "retired") return "RETIRED";
+    // Normal finish ("started" stop-reason): show the score, not a STARTED sticker.
   }
   return formatScoreLabel(event.score);
 }
@@ -107,7 +107,13 @@ export function periodBadge(args: {
   live?: boolean;
   ended?: boolean;
   closed?: boolean;
+  /** Tennis stop-reason (retired / canceled) wins over FT/FINAL. */
+  gameStatus?: string | null;
 }) {
+  const gs = args.gameStatus?.trim().toLowerCase() ?? "";
+  if (gs === "retired") return "RETIRED";
+  if (gs === "canceled" || gs === "cancelled") return "CANCELED";
+
   const period = args.period?.trim() || "";
   const elapsed = args.elapsed?.trim() || "";
   const finalPeriod = period === "VFT" || period === "FT" || period === "FINAL" || period === "F";

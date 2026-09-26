@@ -203,6 +203,8 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                   live={live || sportsData?.live === true}
                   ended={data.ended || sportsData?.ended === true}
                   closed={data.closed || sportsData?.closed === true}
+                  sport={data.sport}
+                  gameStatus={data.gameStatus}
                   atMs={frameAt}
                   scoreHistory={scores.data?.scores ?? []}
                 />

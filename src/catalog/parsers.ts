@@ -420,11 +420,13 @@ function parseTotalsForMatch(
   sport: MonitorSport,
   mainEventId: string,
   event: GammaEvent,
-  seenMarketIds: Set<string>
+  seenMarketIds: Set<string>,
+  opts?: { includeClosed?: boolean },
 ): MonitoredMarket[] {
+  const includeClosed = opts?.includeClosed === true;
   const out: MonitoredMarket[] = [];
   for (const market of event.markets ?? []) {
-    if (market.closed) continue;
+    if (market.closed && !includeClosed) continue;
     if (!isMatchTotalMarket(market)) continue;
     const marketId = marketKey(mainEventId, market);
     if (seenMarketIds.has(marketId)) continue;
@@ -706,7 +708,12 @@ function parseMoneylineFromOutcomes(
   };
 }
 
-function parseEventMarkets(sport: MonitorSport, event: GammaEvent): MonitoredEvent | null {
+function parseEventMarkets(
+  sport: MonitorSport,
+  event: GammaEvent,
+  opts?: { includeClosed?: boolean },
+): MonitoredEvent | null {
+  const includeClosed = opts?.includeClosed === true;
   const title = event.title ?? "";
   if (!isMatchTitle(title, sport)) return null;
   const sides =
@@ -721,7 +728,7 @@ function parseEventMarkets(sport: MonitorSport, event: GammaEvent): MonitoredEve
   const splitMoneylineTokens: MonitoredToken[] = [];
 
   for (const market of event.markets ?? []) {
-    if (market.closed) continue;
+    if (market.closed && !includeClosed) continue;
     const marketId = marketKey(event.id, market);
     const question = market.question ?? "";
 
@@ -787,19 +794,27 @@ export function parseGammaEvent(sport: MonitorSport, event: GammaEvent): Monitor
   return parseEventMarkets(sport, event);
 }
 
-/** Parse live main matches + merge O/U from sibling "More Markets" events. */
-export function parseLiveSportEvents(sport: MonitorSport, gammaEvents: GammaEvent[]): MonitoredEvent[] {
-  const live = gammaEvents.filter(isLiveEvent);
+function mergeSportEvents(
+  sport: MonitorSport,
+  gammaEvents: GammaEvent[],
+  opts?: { includeClosed?: boolean; requireLive?: boolean; tennisOpenOnly?: boolean },
+): MonitoredEvent[] {
+  const includeClosed = opts?.includeClosed === true;
   const byKey = new Map<string, MonitoredEvent>();
   const moreMarkets: GammaEvent[] = [];
 
-  for (const event of live) {
+  for (const event of gammaEvents) {
+    if (opts?.requireLive && !isLiveEvent(event)) continue;
+    if (sport === "tennis") {
+      if (isItfTennisEvent(event)) continue;
+      if (opts?.tennisOpenOnly && !isTennisWatchable(event)) continue;
+    }
     const title = event.title ?? "";
     if (/more markets/i.test(title)) {
       moreMarkets.push(event);
       continue;
     }
-    const parsed = parseEventMarkets(sport, event);
+    const parsed = parseEventMarkets(sport, event, { includeClosed });
     if (parsed) byKey.set(baseMatchKey(parsed.title), parsed);
   }
 
@@ -809,11 +824,28 @@ export function parseLiveSportEvents(sport: MonitorSport, gammaEvents: GammaEven
     if (!main) continue;
     if (event.slug) main.moreMarketsSlug = event.slug;
     const seen = new Set(main.markets.map((m) => m.marketId));
-    const totals = parseTotalsForMatch(sport, main.eventId, event, seen);
+    const totals = parseTotalsForMatch(sport, main.eventId, event, seen, { includeClosed });
     if (totals.length) main.markets.push(...totals);
   }
 
   return [...byKey.values()];
+}
+
+/** Parse live main matches + merge O/U from sibling "More Markets" events. */
+export function parseLiveSportEvents(sport: MonitorSport, gammaEvents: GammaEvent[]): MonitoredEvent[] {
+  return mergeSportEvents(sport, gammaEvents, { requireLive: true });
+}
+
+/**
+ * History / Predexon download: include closed markets, skip live-only filters.
+ * Tennis still drops ITF.
+ */
+export function parseHistorySportEvents(sport: MonitorSport, gammaEvents: GammaEvent[]): MonitoredEvent[] {
+  if (sport === "weather") return parseWeatherEvents(gammaEvents, { includeClosed: true });
+  if (sport === "tennis") {
+    return mergeSportEvents(sport, gammaEvents, { includeClosed: true });
+  }
+  return mergeSportEvents(sport, gammaEvents, { includeClosed: true });
 }
 
 /**
@@ -821,15 +853,7 @@ export function parseLiveSportEvents(sport: MonitorSport, gammaEvents: GammaEven
  * ITF is excluded.
  */
 export function parseOpenTennisEvents(gammaEvents: GammaEvent[]): MonitoredEvent[] {
-  const byKey = new Map<string, MonitoredEvent>();
-  for (const event of gammaEvents) {
-    if (isItfTennisEvent(event)) continue;
-    if (!isTennisWatchable(event)) continue;
-    const parsed = parseEventMarkets("tennis", event);
-    if (!parsed) continue;
-    byKey.set(baseMatchKey(parsed.title), parsed);
-  }
-  return [...byKey.values()];
+  return mergeSportEvents("tennis", gammaEvents, { tennisOpenOnly: true });
 }
 
 function weatherBucketLabel(question: string): string {
@@ -873,21 +897,25 @@ function maxYesOutcomePrice(event: GammaEvent): number | null {
   return max;
 }
 
-function isHighTempWeather(event: GammaEvent) {
+function isHighTempWeather(event: GammaEvent, opts?: { includeClosed?: boolean }) {
   const title = event.title ?? "";
   const slug = event.slug ?? "";
-  if (event.closed || event.ended === true) return false;
+  if (!opts?.includeClosed && (event.closed || event.ended === true)) return false;
   return /highest temperature/i.test(title) || /highest-temperature/i.test(slug);
 }
 
 /** Parse open highest-temperature bucket markets across all cities (Yes + No tokens). */
-export function parseWeatherEvents(gammaEvents: GammaEvent[]): MonitoredEvent[] {
+export function parseWeatherEvents(
+  gammaEvents: GammaEvent[],
+  opts?: { includeClosed?: boolean },
+): MonitoredEvent[] {
+  const includeClosed = opts?.includeClosed === true;
   const out: MonitoredEvent[] = [];
   for (const event of gammaEvents) {
-    if (!isHighTempWeather(event)) continue;
+    if (!isHighTempWeather(event, opts)) continue;
     const markets: MonitoredMarket[] = [];
     for (const market of event.markets ?? []) {
-      if (market.closed) continue;
+      if (market.closed && !includeClosed) continue;
       const yn = yesNo(market);
       if (!yn?.yes.tokenId) continue;
       const question = market.question ?? "";
@@ -963,29 +991,43 @@ export function allTokens(events: MonitoredEvent[]): MonitoredToken[] {
 }
 
 /**
- * WSS dies quietly past ~10–12 sockets. Prefer moneylines/weather, then fill
- * remaining capacity with other markets (totals, spreads, tennis props).
+ * WSS dies quietly past ~10–12 sockets / ~80 assets.
+ * Live in-play sports always beat tennis prematch and weather buckets.
  */
 export function streamTokens(events: MonitoredEvent[], maxTokens = 320): MonitoredToken[] {
-  // Priority: sports moneylines → other sports markets → weather last.
-  // Weather bucket fanout is huge; treating it as primary starved tennis/soccer WSS slots.
-  const moneylines: MonitoredToken[] = [];
-  const otherSports: MonitoredToken[] = [];
+  const sportRank = (sport: MonitorSport) => {
+    if (sport === "soccer") return 0;
+    if (sport === "football") return 1;
+    if (sport === "mlb") return 2;
+    if (sport === "tennis") return 3;
+    return 4; // weather last
+  };
+  const ordered = [...events].sort((a, b) => sportRank(a.sport) - sportRank(b.sport));
+
+  const liveMl: MonitoredToken[] = [];
+  const liveOther: MonitoredToken[] = [];
+  const tennisMl: MonitoredToken[] = [];
+  const tennisOther: MonitoredToken[] = [];
   const weather: MonitoredToken[] = [];
   const seen = new Set<string>();
-  for (const event of events) {
+
+  for (const event of ordered) {
     for (const market of event.markets) {
       for (const row of market.tokens) {
         if (seen.has(row.tokenId)) continue;
         seen.add(row.tokenId);
+        const live = row.sport === "soccer" || row.sport === "football" || row.sport === "mlb";
         if (row.marketType === "weather" || row.sport === "weather") weather.push(row);
-        else if (row.marketType === "moneyline") moneylines.push(row);
-        else otherSports.push(row);
+        else if (live && row.marketType === "moneyline") liveMl.push(row);
+        else if (live) liveOther.push(row);
+        else if (row.marketType === "moneyline") tennisMl.push(row);
+        else tennisOther.push(row);
       }
     }
   }
+
   const out: MonitoredToken[] = [];
-  for (const row of [...moneylines, ...otherSports, ...weather]) {
+  for (const row of [...liveMl, ...liveOther, ...tennisMl, ...tennisOther, ...weather]) {
     if (out.length >= maxTokens) break;
     out.push(row);
   }

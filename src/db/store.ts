@@ -4,10 +4,10 @@ import { dirname } from "node:path";
 import {
   DATA_DIR,
   SPORTS,
-  dbPathForDay,
+  dbPathForMonth,
   idxPathForSport,
   sportDir,
-  utcDay,
+  utcMonth,
 } from "../config/env.ts";
 import type { BookLevel, BookSnapshot, MonitoredEvent, MonitoredToken, MonitorSport } from "../types/monitoring.ts";
 
@@ -30,29 +30,50 @@ export function checkpointDb(db: Database.Database, mode: "PASSIVE" | "TRUNCATE"
   }
 }
 
-export function dayForEvent(event: Pick<MonitoredEvent, "eventDate" | "startTime">): string {
-  if (event.eventDate && /^\d{4}-\d{2}-\d{2}$/.test(event.eventDate)) return event.eventDate;
+/** Shard key = UTC calendar month YYYY-MM (same idea as compare-poly-predict monthly sqlite). */
+export function monthForEvent(event: Pick<MonitoredEvent, "eventDate" | "startTime">): string {
+  if (event.eventDate && /^\d{4}-\d{2}-\d{2}$/.test(event.eventDate)) return event.eventDate.slice(0, 7);
+  if (event.eventDate && /^\d{4}-\d{2}$/.test(event.eventDate)) return event.eventDate;
   if (event.startTime) {
     const t = Date.parse(event.startTime);
-    if (Number.isFinite(t)) return utcDay(t);
+    if (Number.isFinite(t)) return utcMonth(t);
   }
-  return utcDay();
+  return utcMonth();
 }
 
-export function listDayFiles(sport: MonitorSport): string[] {
+/** @deprecated use monthForEvent */
+export function dayForEvent(event: Pick<MonitoredEvent, "eventDate" | "startTime">): string {
+  return monthForEvent(event);
+}
+
+export function listMonthFiles(sport: MonitorSport): string[] {
   const dir = sportDir(sport);
   if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((name) => /^\d{4}-\d{2}-\d{2}\.db$/.test(name))
-    .map((name) => name.slice(0, 10))
-    .sort()
-    .reverse();
+  const months = new Set<string>();
+  for (const name of readdirSync(dir)) {
+    const monthly = /^(\d{4}-\d{2})\.db$/.exec(name);
+    if (monthly) {
+      months.add(monthly[1]!);
+      continue;
+    }
+    // Legacy daily shards from the old monitor.
+    const daily = /^(\d{4}-\d{2})-\d{2}\.db$/.exec(name);
+    if (daily) months.add(daily[1]!);
+  }
+  return [...months].sort().reverse();
+}
+
+/** @deprecated use listMonthFiles */
+export function listDayFiles(sport: MonitorSport): string[] {
+  return listMonthFiles(sport);
 }
 
 /**
  * Compact schema. Layout on disk:
- *   data/{sport}/{YYYY-MM-DD}.db
- *   data/{sport}/_idx.db   (event/token → day)
+ *   data/{sport}/{YYYY-MM}.db
+ *   data/{sport}/_idx.db   (event/token → month)
+ *
+ * `dl` tracks Predexon download completeness (like history-download markets.complete).
  */
 export function initSchema(db: Database.Database) {
   db.exec(`
@@ -122,6 +143,19 @@ export function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_tk_eid ON tk(eid);
     CREATE INDEX IF NOT EXISTS idx_mk_eid ON mk(eid);
+
+    -- Download job tracker (compare-poly-predict markets.complete pattern)
+    CREATE TABLE IF NOT EXISTS dl (
+      eid TEXT PRIMARY KEY,
+      complete INTEGER NOT NULL DEFAULT 0,
+      tokens INTEGER NOT NULL DEFAULT 0,
+      snapshots INTEGER NOT NULL DEFAULT 0,
+      last_ts INTEGER,
+      from_ms INTEGER,
+      to_ms INTEGER,
+      downloaded_at TEXT,
+      note TEXT
+    );
   `);
 }
 
@@ -171,7 +205,7 @@ export class MonitorStore {
   constructor(
     private readonly db: Database.Database,
     readonly sport: MonitorSport,
-    readonly day: string
+    readonly month: string
   ) {
     initSchema(db);
     this.upsertEvent = db.prepare(`
@@ -379,6 +413,93 @@ export class MonitorStore {
     });
   }
 
+  isDownloadComplete(eventId: string): boolean {
+    const row = this.db.prepare(`SELECT complete FROM dl WHERE eid = ?`).get(eventId) as
+      | { complete: number }
+      | undefined;
+    return row?.complete === 1;
+  }
+
+  markDownloadIncomplete(
+    eventId: string,
+    args: { tokens: number; fromMs: number; toMs: number; note?: string | null },
+  ) {
+    this.db
+      .prepare(
+        `INSERT INTO dl (eid, complete, tokens, snapshots, last_ts, from_ms, to_ms, downloaded_at, note)
+         VALUES (?, 0, ?, 0, NULL, ?, ?, ?, ?)
+         ON CONFLICT(eid) DO UPDATE SET
+           complete=0,
+           tokens=excluded.tokens,
+           snapshots=0,
+           last_ts=NULL,
+           from_ms=excluded.from_ms,
+           to_ms=excluded.to_ms,
+           downloaded_at=excluded.downloaded_at,
+           note=excluded.note`,
+      )
+      .run(
+        eventId,
+        args.tokens,
+        args.fromMs,
+        args.toMs,
+        new Date().toISOString(),
+        args.note ?? null,
+      );
+  }
+
+  markDownloadComplete(
+    eventId: string,
+    args: {
+      tokens: number;
+      snapshots: number;
+      lastTs: number | null;
+      fromMs: number;
+      toMs: number;
+      note?: string | null;
+    },
+  ) {
+    this.db
+      .prepare(
+        `INSERT INTO dl (eid, complete, tokens, snapshots, last_ts, from_ms, to_ms, downloaded_at, note)
+         VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(eid) DO UPDATE SET
+           complete=1,
+           tokens=excluded.tokens,
+           snapshots=excluded.snapshots,
+           last_ts=excluded.last_ts,
+           from_ms=excluded.from_ms,
+           to_ms=excluded.to_ms,
+           downloaded_at=excluded.downloaded_at,
+           note=excluded.note`,
+      )
+      .run(
+        eventId,
+        args.tokens,
+        args.snapshots,
+        args.lastTs,
+        args.fromMs,
+        args.toMs,
+        new Date().toISOString(),
+        args.note ?? null,
+      );
+  }
+
+  clearDownload(eventId: string) {
+    this.db.prepare(`DELETE FROM dl WHERE eid = ?`).run(eventId);
+  }
+
+  deleteEventSnapshots(eventId: string) {
+    this.db.prepare(`DELETE FROM ob WHERE eid = ?`).run(eventId);
+  }
+
+  lastTokenSnapshotTs(tokenId: string): number | null {
+    const row = this.db.prepare(`SELECT MAX(ts) AS hi FROM ob WHERE tid = ?`).get(tokenId) as
+      | { hi: number | null }
+      | undefined;
+    return row?.hi ?? null;
+  }
+
   getTokenMeta(tokenId: string): MonitoredToken | null {
     const row = this.db
       .prepare(
@@ -408,9 +529,10 @@ export class MonitorStore {
   }
 }
 
-/** Routes catalog/snapshots across data/{sport}/{day}.db files. */
+/** Routes catalog/snapshots across data/{sport}/{YYYY-MM}.db files. */
 export class MonitorHub {
   private readonly cache = new Map<string, MonitorStore>();
+  /** Shard key stored as `day` in _idx for dashboard compat — value is YYYY-MM. */
   private readonly eventLoc = new Map<string, { sport: MonitorSport; day: string }>();
   private readonly tokenLoc = new Map<string, { sport: MonitorSport; day: string }>();
   private readonly idx = new Map<MonitorSport, Database.Database>();
@@ -432,49 +554,50 @@ export class MonitorHub {
         );
       `);
       this.idx.set(sport, idxDb);
-      // Warm location maps from index.
       for (const row of idxDb.prepare(`SELECT eid, day FROM loc`).all() as Array<{ eid: string; day: string }>) {
-        this.eventLoc.set(row.eid, { sport, day: row.day });
+        this.eventLoc.set(row.eid, { sport, day: normalizeShard(row.day) });
       }
       for (const row of idxDb.prepare(`SELECT tid, eid, day FROM tok`).all() as Array<{
         tid: string;
         eid: string;
         day: string;
       }>) {
-        this.tokenLoc.set(row.tid, { sport, day: row.day });
+        this.tokenLoc.set(row.tid, { sport, day: normalizeShard(row.day) });
       }
     }
   }
 
-  private key(sport: MonitorSport, day: string) {
-    return `${sport}/${day}`;
+  private key(sport: MonitorSport, month: string) {
+    return `${sport}/${month}`;
   }
 
-  store(sport: MonitorSport, day: string) {
-    const k = this.key(sport, day);
+  store(sport: MonitorSport, month: string) {
+    const shard = normalizeShard(month);
+    const k = this.key(sport, shard);
     let s = this.cache.get(k);
     if (!s) {
-      s = new MonitorStore(openDb(dbPathForDay(sport, day)), sport, day);
+      s = new MonitorStore(openDb(dbPathForMonth(sport, shard)), sport, shard);
       this.cache.set(k, s);
     }
     return s;
   }
 
-  private remember(event: MonitoredEvent, day: string) {
+  private remember(event: MonitoredEvent, month: string) {
     const sport = event.sport;
-    this.eventLoc.set(event.eventId, { sport, day });
+    const shard = normalizeShard(month);
+    this.eventLoc.set(event.eventId, { sport, day: shard });
     const idx = this.idx.get(sport)!;
     idx.prepare(`INSERT INTO loc (eid, day) VALUES (?, ?) ON CONFLICT(eid) DO UPDATE SET day = excluded.day`).run(
       event.eventId,
-      day
+      shard,
     );
     const upsertTok = idx.prepare(
-      `INSERT INTO tok (tid, eid, day) VALUES (?, ?, ?) ON CONFLICT(tid) DO UPDATE SET eid = excluded.eid, day = excluded.day`
+      `INSERT INTO tok (tid, eid, day) VALUES (?, ?, ?) ON CONFLICT(tid) DO UPDATE SET eid = excluded.eid, day = excluded.day`,
     );
     for (const market of event.markets) {
       for (const token of market.tokens) {
-        this.tokenLoc.set(token.tokenId, { sport, day });
-        upsertTok.run(token.tokenId, event.eventId, day);
+        this.tokenLoc.set(token.tokenId, { sport, day: shard });
+        upsertTok.run(token.tokenId, event.eventId, shard);
       }
     }
   }
@@ -482,16 +605,16 @@ export class MonitorHub {
   syncCatalog(events: MonitoredEvent[]) {
     const groups = new Map<string, MonitoredEvent[]>();
     for (const event of events) {
-      const day = dayForEvent(event);
-      const k = this.key(event.sport, day);
+      const month = monthForEvent(event);
+      const k = this.key(event.sport, month);
       const list = groups.get(k) ?? [];
       list.push(event);
       groups.set(k, list);
-      this.remember(event, day);
+      this.remember(event, month);
     }
     for (const [k, list] of groups) {
-      const [sport, day] = k.split("/") as [MonitorSport, string];
-      this.store(sport, day).syncCatalog(list);
+      const [sport, month] = k.split("/") as [MonitorSport, string];
+      this.store(sport, month).syncCatalog(list);
     }
   }
 
@@ -499,14 +622,13 @@ export class MonitorHub {
     return [...this.eventLoc.keys()];
   }
 
-  /** Open (e=0) ids from day DBs — catches orphans that left the in-memory catalog. */
   listOpenEventIds(sport?: MonitorSport) {
     const sports = sport ? [sport] : [...SPORTS];
     const out: string[] = [];
     for (const s of sports) {
-      for (const day of listDayFiles(s)) {
-        for (const id of this.store(s, day).listOpenEventIds()) {
-          this.eventLoc.set(id, { sport: s, day });
+      for (const month of listMonthFiles(s)) {
+        for (const id of this.store(s, month).listOpenEventIds()) {
+          this.eventLoc.set(id, { sport: s, day: month });
           out.push(id);
         }
       }
@@ -522,10 +644,55 @@ export class MonitorHub {
     return this.eventLoc.get(eventId) ?? null;
   }
 
+  isDownloadComplete(eventId: string): boolean {
+    const loc = this.eventLoc.get(eventId);
+    if (!loc) return false;
+    return this.store(loc.sport, loc.day).isDownloadComplete(eventId);
+  }
+
+  markDownloadIncomplete(
+    eventId: string,
+    args: { tokens: number; fromMs: number; toMs: number; note?: string | null },
+  ) {
+    const loc = this.eventLoc.get(eventId);
+    if (!loc) return;
+    this.store(loc.sport, loc.day).markDownloadIncomplete(eventId, args);
+  }
+
+  markDownloadComplete(
+    eventId: string,
+    args: {
+      tokens: number;
+      snapshots: number;
+      lastTs: number | null;
+      fromMs: number;
+      toMs: number;
+      note?: string | null;
+    },
+  ) {
+    const loc = this.eventLoc.get(eventId);
+    if (!loc) return;
+    this.store(loc.sport, loc.day).markDownloadComplete(eventId, args);
+  }
+
+  resetDownload(eventId: string) {
+    const loc = this.eventLoc.get(eventId);
+    if (!loc) return;
+    const store = this.store(loc.sport, loc.day);
+    store.clearDownload(eventId);
+    store.deleteEventSnapshots(eventId);
+  }
+
+  lastTokenSnapshotTs(tokenId: string, eventId: string): number | null {
+    const loc = this.eventLoc.get(eventId) ?? this.tokenLoc.get(tokenId);
+    if (!loc) return null;
+    return this.store(loc.sport, loc.day).lastTokenSnapshotTs(tokenId);
+  }
+
   listArmedEventIds() {
     const out = new Set<string>();
-    for (const day of listDayFiles("weather")) {
-      for (const id of this.store("weather", day).listArmedEventIds()) out.add(id);
+    for (const month of listMonthFiles("weather")) {
+      for (const id of this.store("weather", month).listArmedEventIds()) out.add(id);
     }
     return [...out];
   }
@@ -538,8 +705,8 @@ export class MonitorHub {
 
   armWeatherThatAlreadyHasBooks() {
     let n = 0;
-    for (const day of listDayFiles("weather")) {
-      n += this.store("weather", day).armWeatherThatAlreadyHasBooks();
+    for (const month of listMonthFiles("weather")) {
+      n += this.store("weather", month).armWeatherThatAlreadyHasBooks();
     }
     return n;
   }
@@ -556,21 +723,17 @@ export class MonitorHub {
       by.set(k, list);
     }
     for (const [k, ids] of by) {
-      const [sport, day] = k.split("/") as [MonitorSport, string];
-      this.store(sport, day).markEventsFinished(ids, finishedAt);
+      const [sport, month] = k.split("/") as [MonitorSport, string];
+      this.store(sport, month).markEventsFinished(ids, finishedAt);
     }
   }
 
-  /**
-   * Finish open rows whose books went silent for maxAgeMs (or never recorded).
-   * Used to clear tennis/weather zombies when Gamma open catalog is empty/hung.
-   */
   scrubSilentOpen(sport: MonitorSport, maxAgeMs: number, now = Date.now()) {
     const finished: string[] = [];
-    for (const day of listDayFiles(sport)) {
-      const store = this.store(sport, day);
+    for (const month of listMonthFiles(sport)) {
+      const store = this.store(sport, month);
       for (const id of store.listOpenEventIds()) {
-        this.eventLoc.set(id, { sport, day });
+        this.eventLoc.set(id, { sport, day: month });
         const hi = store.raw
           .prepare(`SELECT MAX(ts) AS hi FROM ob WHERE eid = ?`)
           .get(id) as { hi: number | null };
@@ -593,8 +756,8 @@ export class MonitorHub {
       by.set(k, list);
     }
     for (const [k, list] of by) {
-      const [sport, day] = k.split("/") as [MonitorSport, string];
-      this.store(sport, day).updatePolyStatuses(list);
+      const [sport, month] = k.split("/") as [MonitorSport, string];
+      this.store(sport, month).updatePolyStatuses(list);
     }
   }
 
@@ -602,7 +765,7 @@ export class MonitorHub {
     const loc =
       this.tokenLoc.get(snap.tokenId) ??
       this.eventLoc.get(snap.eventId) ??
-      { sport: snap.sport, day: utcDay(snap.capturedAt) };
+      { sport: snap.sport, day: utcMonth(snap.capturedAt) };
     this.store(loc.sport, loc.day).recordSnapshot(snap);
   }
 
@@ -614,8 +777,9 @@ export class MonitorHub {
         | { day: string }
         | undefined;
       if (!row) continue;
-      this.tokenLoc.set(tokenId, { sport, day: row.day });
-      return this.store(sport, row.day).getTokenMeta(tokenId);
+      const shard = normalizeShard(row.day);
+      this.tokenLoc.set(tokenId, { sport, day: shard });
+      return this.store(sport, shard).getTokenMeta(tokenId);
     }
     return null;
   }
@@ -625,8 +789,8 @@ export class MonitorHub {
     let tokens = 0;
     let snapshots = 0;
     for (const sport of SPORTS) {
-      for (const day of listDayFiles(sport)) {
-        const s = this.store(sport, day).stats();
+      for (const month of listMonthFiles(sport)) {
+        const s = this.store(sport, month).stats();
         events += s.events;
         tokens += s.tokens;
         snapshots += s.snapshots;
@@ -646,6 +810,12 @@ export class MonitorHub {
     for (const idx of this.idx.values()) idx.close();
     this.idx.clear();
   }
+}
+
+/** Normalize shard key to YYYY-MM (accepts legacy YYYY-MM-DD). */
+function normalizeShard(raw: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw.slice(0, 7);
+  return raw;
 }
 
 export function parseLevels(raw: Array<{ price?: string | number; size?: string | number }>): BookLevel[] {
@@ -674,3 +844,4 @@ export function depthSum(levels: BookLevel[]) {
 export function normalizeBookSide(levels: BookLevel[], side: "bid" | "ask") {
   return [...levels].sort((a, b) => (side === "bid" ? b.price - a.price : a.price - b.price));
 }
+

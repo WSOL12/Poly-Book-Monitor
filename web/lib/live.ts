@@ -47,6 +47,8 @@ export function matchPhase(event: {
 
   if (event.sport === "tennis") {
     if (isTennisVoidStatus(event.gameStatus)) return "voided";
+    // "started" is the stop-reason for a normal finish when we never saw live=true.
+    if ((event.ended || event.closed) && gs === "started") return "finished";
     if (gs === "started" || event.polyLive) return "live";
     if (event.ended || event.closed) return "finished";
     return "open";

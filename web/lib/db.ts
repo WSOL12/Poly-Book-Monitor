@@ -1,13 +1,15 @@
 import Database from "better-sqlite3";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { fetchEventsByIds, finishedAtFromGamma, isFinishedGammaEvent, tennisStopReason, type GammaMarketStatus } from "./gamma";
 import { leagueFromGamma } from "./league";
 import {
   DATA_DIR,
   SPORTS,
   dbPathForDay,
+  dbPathForMonth,
   idxPathForSport,
   listDayFiles,
+  listMonthFiles,
   sportDir,
   type Sport,
 } from "./paths";
@@ -206,9 +208,31 @@ function sanitizeQuote(bestBid: number | null, bestAsk: number | null) {
   return { bestBid, bestAsk };
 }
 
-function openDay(sport: Sport, day: string, readonly = true) {
-  const path = dbPathForDay(sport, day);
-  if (!existsSync(path)) return null;
+function openDay(sport: Sport, dayOrMonth: string, readonly = true) {
+  const month = /^\d{4}-\d{2}-\d{2}$/.test(dayOrMonth) ? dayOrMonth.slice(0, 7) : dayOrMonth;
+  const candidates: string[] = [dbPathForMonth(sport, month)];
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dayOrMonth)) {
+    candidates.push(dbPathForDay(sport, dayOrMonth));
+  } else {
+    // Legacy: monthly key may only exist as daily files from the old monitor.
+    const dir = sportDir(sport);
+    if (existsSync(dir)) {
+      for (const name of readdirSync(dir)) {
+        if (name.startsWith(`${month}-`) && /^\d{4}-\d{2}-\d{2}\.db$/.test(name)) {
+          candidates.push(dbPathForDay(sport, name.slice(0, 10)));
+        }
+      }
+    }
+  }
+
+  let path: string | null = null;
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      path = p;
+      break;
+    }
+  }
+  if (!path) return null;
   const db = new Database(path, { readonly, fileMustExist: true });
   if (!readonly) {
     db.pragma("busy_timeout = 5000");

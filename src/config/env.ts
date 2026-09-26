@@ -33,25 +33,37 @@ export function sportDir(sport: EnvSport) {
   return resolve(DATA_DIR, sport);
 }
 
-/** data/mlb/2026-09-16.db */
-export function dbPathForDay(sport: EnvSport, day: string) {
-  return resolve(sportDir(sport), `${day}.db`);
+/** UTC calendar month key, e.g. 2026-09 */
+export function utcMonth(ms = Date.now()) {
+  return new Date(ms).toISOString().slice(0, 7);
 }
 
-/** data/mlb/_idx.db — event/token → day map */
+/** data/mlb/2026-09.db */
+export function dbPathForMonth(sport: EnvSport, month: string) {
+  return resolve(sportDir(sport), `${month}.db`);
+}
+
+/** data/mlb/_idx.db — event/token → month map */
 export function idxPathForSport(sport: EnvSport) {
   return resolve(sportDir(sport), "_idx.db");
 }
 
+/** @deprecated use utcMonth */
 export function utcDay(ms = Date.now()) {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-export const CATALOG_REFRESH_MS = Number(process.env.CATALOG_REFRESH_MS ?? 30_000);
-export const CONSOLE_REFRESH_MS = Number(process.env.CONSOLE_REFRESH_MS ?? 2_000);
-export const WEATHER_ARM_PRICE = Number(process.env.WEATHER_ARM_PRICE ?? 0.6);
-/** Keep streaming after Gamma marks finished so settlement books (0.1¢) get recorded. */
-export const POST_FINISH_GRACE_MS = Number(process.env.POST_FINISH_GRACE_MS ?? 20 * 60_000);
+/** @deprecated use dbPathForMonth */
+export function dbPathForDay(sport: EnvSport, dayOrMonth: string) {
+  const month = /^\d{4}-\d{2}-\d{2}$/.test(dayOrMonth) ? dayOrMonth.slice(0, 7) : dayOrMonth;
+  return dbPathForMonth(sport, month);
+}
+
+/** Ensure data dirs exist (download / dashboard). */
+export function ensureDataDirs() {
+  mkdirSync(DATA_DIR, { recursive: true });
+  for (const sport of SPORTS) mkdirSync(sportDir(sport), { recursive: true });
+}
 
 /** @deprecated */
 export const DB_PATH = process.env.DB_PATH ?? resolve(DATA_DIR, "monitoring.db");

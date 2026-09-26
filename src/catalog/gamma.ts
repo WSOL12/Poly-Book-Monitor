@@ -1,7 +1,4 @@
-import { polyFetch } from "../utils/polyNet.ts";
 import type { MonitorSport } from "../types/monitoring.ts";
-
-const GAMMA = "https://gamma-api.polymarket.com";
 
 export type GammaMarket = {
   id?: string;
@@ -96,26 +93,114 @@ export function isItfTennisEvent(
   return false;
 }
 
-function moneylineIsFiftyFifty(event: Pick<GammaEvent, "markets">) {
+function marketPrices(market: GammaMarket): [number, number] | null {
+  const prices = parseJsonField<Array<string | number>>(market.outcomePrices, []);
+  if (prices.length < 2) return null;
+  const a = Number(prices[0]);
+  const b = Number(prices[1]);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return [a, b];
+}
+
+function priceIsYes(a: number, b: number) {
+  return a >= 0.95 && b <= 0.05;
+}
+
+function priceIsNo(a: number, b: number) {
+  return a <= 0.05 && b >= 0.95;
+}
+
+function priceIsFiftyFifty(a: number, b: number) {
+  return Math.abs(a - 0.5) <= 0.03 && Math.abs(b - 0.5) <= 0.03;
+}
+
+/**
+ * Polymarket tennis_completed_match: Yes = finished normally, No = cancel/retire.
+ * Retirements still pay the moneyline winner — do NOT use set props @50¢ for this.
+ */
+function tennisCompletedMatchOutcome(
+  event: Pick<GammaEvent, "markets">
+): "yes" | "no" | "void" | null {
   for (const market of event.markets ?? []) {
-    if (market.closed) continue;
     const type = (market.sportsMarketType ?? "").toLowerCase();
-    const names = parseJsonField<string[]>(market.outcomes, []);
-    const prices = parseJsonField<Array<string | number>>(market.outcomePrices, []);
-    if (names.length < 2 || prices.length < 2) continue;
-    const a = Number(prices[0]);
-    const b = Number(prices[1]);
-    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
-    if (Math.abs(a - 0.5) > 0.02 || Math.abs(b - 0.5) > 0.02) continue;
-    if (
-      type === "moneyline" ||
-      / vs\.? /i.test(market.question ?? "") ||
-      names.some((n) => /^(yes|no)$/i.test(n))
-    ) {
-      return true;
+    if (type !== "tennis_completed_match" && !/completed match/i.test(market.question ?? "")) {
+      continue;
     }
+    const prices = marketPrices(market);
+    if (!prices) continue;
+    const [a, b] = prices;
+    if (priceIsYes(a, b)) return "yes";
+    if (priceIsNo(a, b)) return "no";
+    if (priceIsFiftyFifty(a, b)) return "void";
+  }
+  return null;
+}
+
+/** Only the actual moneyline market — never Set Winner / Totals with "vs" in the title. */
+export function tennisMoneylineIsVoided(event: Pick<GammaEvent, "markets">) {
+  for (const market of event.markets ?? []) {
+    if ((market.sportsMarketType ?? "").toLowerCase() !== "moneyline") continue;
+    const prices = marketPrices(market);
+    if (!prices) continue;
+    if (priceIsFiftyFifty(prices[0], prices[1])) return true;
   }
   return false;
+}
+
+function moneylineLooksVoided(event: Pick<GammaEvent, "markets">) {
+  return tennisMoneylineIsVoided(event);
+}
+
+/** Moneyline resolved to a winner (retirements pay the advancer; cancels stay ~50/50). */
+function moneylineHasWinner(event: Pick<GammaEvent, "markets">) {
+  for (const market of event.markets ?? []) {
+    if ((market.sportsMarketType ?? "").toLowerCase() !== "moneyline") continue;
+    const prices = marketPrices(market);
+    if (!prices) continue;
+    const [a, b] = prices;
+    if (priceIsYes(a, b) || priceIsNo(a, b)) return true;
+  }
+  return false;
+}
+
+function tennisSetWinner(homeGames: number, awayGames: number): "home" | "away" | null {
+  if (homeGames >= 6 && homeGames - awayGames >= 2) return "home";
+  if (awayGames >= 6 && awayGames - homeGames >= 2) return "away";
+  if (homeGames === 7 && awayGames === 6) return "home";
+  if (awayGames === 7 && homeGames === 6) return "away";
+  return null;
+}
+
+/** Best-of-3/5 finished normally (someone reached 2+ or 3+ set wins). */
+export function tennisScoreIsComplete(score?: string | null) {
+  const raw = score?.trim();
+  if (!raw) return false;
+  if (raw.includes(",")) {
+    let homeWins = 0;
+    let awayWins = 0;
+    for (const part of raw.split(",")) {
+      const m = part.trim().match(/^(\d+)\s*-\s*(\d+)/);
+      if (!m) return false;
+      const winner = tennisSetWinner(Number(m[1]), Number(m[2]));
+      if (!winner) return false;
+      if (winner === "home") homeWins += 1;
+      else awayWins += 1;
+    }
+    const played = homeWins + awayWins;
+    if (played <= 3) return homeWins >= 2 || awayWins >= 2;
+    return homeWins >= 3 || awayWins >= 3;
+  }
+  const simple = raw.match(/^(\d+)\s*-\s*(\d+)$/);
+  if (!simple) return false;
+  const home = Number(simple[1]);
+  const away = Number(simple[2]);
+  // Set-wins only (2-0 / 2-1 / 3-1…), not a single unfinished game line.
+  return (home >= 2 || away >= 2) && home + away <= 5 && Math.abs(home - away) <= 2;
+}
+
+function tennisScoreIsBlank(score?: string | null) {
+  const s = (score ?? "").replace(/\s+/g, "");
+  return !s || s === "0-0" || s === "0-0,0-0";
 }
 
 function isCanceledTennisStatus(period?: string | null, gameStatus?: string | null) {
@@ -132,7 +217,12 @@ function isCanceledTennisStatus(period?: string | null, gameStatus?: string | nu
 
 /**
  * Why we stop watching an open tennis match.
- * Polymarket voids cancel/retire moneylines at ~50/50 — only trust that when settling.
+ *
+ * Priority:
+ * 1) Explicit Gamma period/status (CAN / retir…)
+ * 2) tennis_completed_match Yes/No (authoritative on Polymarket)
+ * 3) moneyline @50/50 only when that market itself voided (cancel before start)
+ * 4) Complete set line → normal finish
  */
 export function tennisStopReason(
   event: Pick<
@@ -142,24 +232,32 @@ export function tennisStopReason(
 ): TennisStopReason | null {
   if (event.live === true) return "started";
 
-  const blob = `${event.gameStatus ?? ""} ${event.period ?? ""} ${event.score ?? ""}`;
+  const blob = `${event.gameStatus ?? ""} ${event.period ?? ""}`;
   if (/retir/i.test(blob)) return "retired";
   if (isCanceledTennisStatus(event.period, event.gameStatus)) return "canceled";
 
   const settling =
     event.ended === true || event.closed === true || isFinalPeriod(event.period);
-  if (settling && moneylineIsFiftyFifty(event)) {
-    const score = (event.score ?? "").replace(/\s+/g, "");
-    // Void with no real score → canceled; partial score + void → retirement.
-    if (!score || score === "0-0" || score === "0-0,0-0") return "canceled";
-    return "retired";
+  if (!settling) return null;
+
+  const completed = tennisCompletedMatchOutcome(event);
+  if (completed === "yes" || tennisScoreIsComplete(event.score)) return "started";
+  if (completed === "no") {
+    // Completed Match = No:
+    //   moneyline winner → retirement/default (advancer paid)
+    //   moneyline ~50/50 or blank → canceled / walkover before start
+    // Gamma often omits the partial score on retirements — don't require it.
+    if (moneylineHasWinner(event) || !tennisScoreIsBlank(event.score)) return "retired";
+    return "canceled";
   }
 
-  if (settling) {
-    // Match completed without catching live=true — still a started match.
-    return "started";
+  // Fallback when Completed Match market is missing: only trust the moneyline void.
+  if (moneylineLooksVoided(event) || completed === "void") {
+    return tennisScoreIsBlank(event.score) ? "canceled" : "retired";
   }
-  return null;
+
+  // Settled without void signals — finished (possibly without ever seeing live=true).
+  return "started";
 }
 
 /** Prematch ATP/WTA (etc.) still worth streaming. */
@@ -225,44 +323,6 @@ export function finishedAtFromGamma(
   return times.length ? Math.min(...times) : Date.now();
 }
 
-/** Gamma silently truncates large `id=` batches; keep chunks small and retry misses. */
-const EVENTS_BY_ID_CHUNK = 20;
-
-async function fetchEventsByIdChunk(chunk: string[]): Promise<GammaEvent[]> {
-  if (!chunk.length) return [];
-  const qs = chunk.map((id) => `id=${encodeURIComponent(id)}`).join("&");
-  const url = `${GAMMA}/events?${qs}`;
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await polyFetch(url);
-      if (!res.ok) throw new Error(`Gamma HTTP ${res.status}`);
-      return (await res.json()) as GammaEvent[];
-    } catch (err) {
-      lastErr = err;
-      if (attempt < 2) await new Promise((r) => setTimeout(r, 2_000 * (attempt + 1)));
-    }
-  }
-  throw lastErr;
-}
-
-export async function fetchEventsByIds(ids: string[]): Promise<GammaEvent[]> {
-  const unique = [...new Set(ids.filter(Boolean).map(String))];
-  if (!unique.length) return [];
-  const out = new Map<string, GammaEvent>();
-  for (let i = 0; i < unique.length; i += EVENTS_BY_ID_CHUNK) {
-    const chunk = unique.slice(i, i + EVENTS_BY_ID_CHUNK);
-    const page = await fetchEventsByIdChunk(chunk);
-    for (const event of page) out.set(String(event.id), event);
-  }
-  const missing = unique.filter((id) => !out.has(id));
-  for (const id of missing) {
-    const page = await fetchEventsByIdChunk([id]);
-    for (const event of page) out.set(String(event.id), event);
-  }
-  return [...out.values()];
-}
-
 export function parseJsonField<T>(value: unknown, fallback: T): T {
   if (value == null) return fallback;
   if (typeof value !== "string") return value as T;
@@ -281,83 +341,11 @@ export function eventSchedule(event: GammaEvent) {
   return { startTime, eventDate };
 }
 
-async function fetchTagPages(
-  tag: string,
-  opts: { liveOnly: boolean; maxOffset: number; timeoutMs?: number }
-): Promise<GammaEvent[]> {
-  const out: GammaEvent[] = [];
-  const timeoutMs = opts.timeoutMs ?? 20_000;
-  for (let offset = 0; ; offset += 50) {
-    const liveQ = opts.liveOnly ? "&live=true" : "";
-    const url = `${GAMMA}/events?closed=false&active=true${liveQ}&limit=50&offset=${offset}&tag_slug=${encodeURIComponent(tag)}&order=endDate&ascending=true`;
-    let page: GammaEvent[] | null = null;
-    let lastErr: unknown;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await polyFetch(url, timeoutMs);
-        if (!res.ok) throw new Error(`Gamma HTTP ${res.status}`);
-        page = (await res.json()) as GammaEvent[];
-        break;
-      } catch (err) {
-        lastErr = err;
-        if (attempt < 1) await new Promise((r) => setTimeout(r, 800));
-      }
-    }
-    if (!page) throw lastErr;
-    out.push(...page);
-    if (page.length < 50) break;
-    if (offset >= opts.maxOffset) break;
-  }
-  return out;
-}
-
-export async function fetchEventsByTags(tags: string[]): Promise<GammaEvent[]> {
-  const byId = new Map<string, GammaEvent>();
-  // Live boards are small — one page per tag is enough; deep paging was starving the catalog.
-  const results = await Promise.allSettled(
-    tags.map((tag) => fetchTagPages(tag, { liveOnly: true, maxOffset: 50 }))
-  );
-  for (const result of results) {
-    if (result.status !== "fulfilled") continue;
-    for (const event of result.value) {
-      if (isLiveEvent(event)) byId.set(String(event.id), event);
-    }
-  }
-  if (!byId.size && results.every((r) => r.status === "rejected")) {
-    const first = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
-    throw first.reason;
-  }
-  return [...byId.values()];
-}
-
-/** Open (not necessarily live) events — used for weather + tennis prematch. */
-export async function fetchOpenEventsByTags(tags: string[]): Promise<GammaEvent[]> {
-  const byId = new Map<string, GammaEvent>();
-  // One page; 15s — 8s was aborting tennis behind the HTTP gate during weather dumps.
-  const results = await Promise.allSettled(
-    tags.map((tag) =>
-      fetchTagPages(tag, { liveOnly: false, maxOffset: 50, timeoutMs: 15_000 })
-    )
-  );
-  for (const result of results) {
-    if (result.status !== "fulfilled") continue;
-    for (const event of result.value) {
-      if (!event.closed && event.ended !== true) byId.set(String(event.id), event);
-    }
-  }
-  if (!byId.size && results.every((r) => r.status === "rejected")) {
-    const first = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
-    throw first.reason;
-  }
-  return [...byId.values()];
-}
-
+/** Tag slugs used when listing events via Predexon (see src/predexon/catalog.ts). */
 export const SPORT_TAGS: Record<MonitorSport, string[]> = {
-  // Single live tag — multi-tag fanout filled the HTTP gate and starved WSS reconnects.
   soccer: ["soccer"],
   football: ["nfl"],
   mlb: ["mlb"],
   weather: ["highest-temperature"],
-  /** Open ATP/WTA matches; ITF filtered in parsers (seriesSlug / title). */
   tennis: ["tennis"],
 };
