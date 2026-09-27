@@ -370,6 +370,8 @@ function mapEventRow(row: {
 }
 
 export async function refreshPolyStatuses() {
+  // Only hit Gamma for matches that still need live status — not thousands of old DONE/VOID rows.
+  const recentCutoff = Date.now() - 12 * 60 * 60 * 1000;
   for (const sport of SPORTS) {
     for (const day of listDayFiles(sport)) {
       const path = dbPathForDay(sport, day);
@@ -377,9 +379,16 @@ export async function refreshPolyStatuses() {
       const db = new Database(path);
       try {
         ensureSchema(db);
-        const ids = (db.prepare(`SELECT id AS eventId FROM ev`).all() as Array<{ eventId: string }>).map(
-          (row) => row.eventId
-        );
+        const ids = (
+          db
+            .prepare(
+              `SELECT id AS eventId FROM ev
+               WHERE (e = 0 AND c = 0)
+                  OR (fa IS NOT NULL AND fa > ?)
+                  OR (fa IS NULL AND e = 0)`
+            )
+            .all(recentCutoff) as Array<{ eventId: string }>
+        ).map((row) => row.eventId);
         if (!ids.length) continue;
         const gammaRows = await fetchEventsByIds(ids);
         const update = db.prepare(`
@@ -452,7 +461,14 @@ export async function refreshPolyStatuses() {
   }
 }
 
+let overviewCache: { at: number; value: OverviewStats } | null = null;
+const OVERVIEW_CACHE_MS = 15_000;
+
 export function getOverview(): OverviewStats {
+  const now = Date.now();
+  if (overviewCache && now - overviewCache.at < OVERVIEW_CACHE_MS) {
+    return overviewCache.value;
+  }
   const bySport: OverviewStats["bySport"] = [];
   let events = 0;
   let tokens = 0;
@@ -481,7 +497,9 @@ export function getOverview(): OverviewStats {
     snapshots += s;
     bySport.push({ sport, events: e, tokens: t, snapshots: s, path });
   }
-  return { dbPath: DATA_DIR, exists: any, events, tokens, snapshots, bySport };
+  const value = { dbPath: DATA_DIR, exists: any, events, tokens, snapshots, bySport };
+  overviewCache = { at: now, value };
+  return value;
 }
 
 export function listEvents(sport?: Sport): EventRow[] {

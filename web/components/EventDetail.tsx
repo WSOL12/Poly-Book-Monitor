@@ -189,7 +189,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
               <span className="crumb-meta">
                 <span className={`sport-chip sport-${data.sport}`}>{data.sport}</span>
                 <span className={live || phase === "live" ? "match-status is-live" : phase === "voided" ? "match-status is-void" : "match-status"}>
-                  {phase ? matchPhaseLabel(phase, data.sport, data.gameStatus) : live ? "Live" : "Finished"}
+                  {phase ? matchPhaseLabel(phase, data.sport, data.gameStatus, data.score, data.period) : live ? "Live" : "Finished"}
                 </span>
               </span>
             </div>

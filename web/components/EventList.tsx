@@ -75,7 +75,7 @@ function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
         >
           {tab !== "open" && tab !== "live" && event.lastSnapshotAt == null
             ? "No book"
-            : matchPhaseLabel(phase, event.sport, event.gameStatus)}
+            : matchPhaseLabel(phase, event.sport, event.gameStatus, event.score, event.period)}
         </span>
         <span className="match-time mono">
           {tab === "finished" || tab === "voided"

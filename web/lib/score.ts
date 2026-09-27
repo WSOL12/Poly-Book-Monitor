@@ -76,10 +76,33 @@ export function formatScoreLabel(score: string | null | undefined): string | nul
   return `${parsed.homeTotal}–${parsed.awayTotal}`;
 }
 
+/**
+ * Which set a tennis retirement happened in.
+ * Uses the number of set segments in the score (last = active/retired set).
+ * Falls back to period text like "Set 2" when score is missing.
+ */
+export function tennisRetiredSetNumber(
+  score?: string | null,
+  period?: string | null
+): number | null {
+  const parsed = parseScoreString(score);
+  if (parsed) {
+    const n = Math.max(parsed.homeSets.length, parsed.awaySets.length);
+    return n >= 1 ? n : null;
+  }
+  const p = period?.trim() ?? "";
+  if (!p) return null;
+  const m = p.match(/set\s*(\d+)/i) ?? p.match(/^(\d+)$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n >= 1 && n <= 5 ? n : null;
+}
+
 /** Sports score, weather winning temp, or tennis stop reason. */
 export function eventResultLabel(event: {
   sport: string;
   score?: string | null;
+  period?: string | null;
   winTemp?: string | null;
   gameStatus?: string | null;
 }): string | null {
@@ -87,7 +110,10 @@ export function eventResultLabel(event: {
   if (event.sport === "tennis") {
     const gs = event.gameStatus?.trim().toLowerCase() ?? "";
     if (gs === "canceled" || gs === "cancelled") return "CANCELED";
-    if (gs === "retired") return "RETIRED";
+    if (gs === "retired") {
+      const setN = tennisRetiredSetNumber(event.score, event.period);
+      return setN != null ? `RET S${setN}` : "RETIRED";
+    }
     // Normal finish ("started" stop-reason): show the score, not a STARTED sticker.
   }
   return formatScoreLabel(event.score);

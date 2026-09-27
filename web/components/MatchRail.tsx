@@ -195,7 +195,7 @@ export function MatchRail({
                         <span className="match-rail-dot">·</span>
                         {tennisMode ? (
                           <span>
-                            {matchPhaseLabel(phase, event.sport, event.gameStatus)}
+                            {matchPhaseLabel(phase, event.sport, event.gameStatus, event.score, event.period)}
                             {" · "}
                           </span>
                         ) : null}

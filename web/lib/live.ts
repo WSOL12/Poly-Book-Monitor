@@ -1,4 +1,5 @@
 import type { EventRow } from "@/lib/db";
+import { tennisRetiredSetNumber } from "@/lib/score";
 
 /** Finished when Polymarket reports ended/closed, or period is final. */
 export function isEventFinished(event: {
@@ -66,13 +67,18 @@ export function matchPhase(event: {
 export function matchPhaseLabel(
   phase: MatchPhase,
   sport?: string | null,
-  gameStatus?: string | null
+  gameStatus?: string | null,
+  score?: string | null,
+  period?: string | null
 ) {
   if (phase === "open") return "Open";
   if (phase === "live") return "Live";
   if (phase === "voided") {
     const gs = gameStatus?.trim().toLowerCase() ?? "";
-    if (gs === "retired") return "Retired";
+    if (gs === "retired") {
+      const setN = tennisRetiredSetNumber(score, period);
+      return setN != null ? `Retired S${setN}` : "Retired";
+    }
     if (gs === "canceled" || gs === "cancelled") return "Canceled";
     return "Void";
   }
