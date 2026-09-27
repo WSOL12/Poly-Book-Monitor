@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SnapshotRow } from "@/lib/db";
 import { cls } from "@/lib/format";
@@ -84,7 +84,7 @@ const FINE_WINDOWS = [
 /** Coarse slider resolution — time-based, identical across markets. */
 const COARSE_STEPS = 1000;
 
-function DepthRow({
+const DepthRow = memo(function DepthRow({
   side,
   price,
   size,
@@ -109,7 +109,95 @@ function DepthRow({
       <span className="poly-total">{dollars(price, total)}</span>
     </div>
   );
-}
+});
+
+type LadderLevel = { price: number; size: number; total: number };
+
+const BookLadder = memo(function BookLadder({
+  shortName,
+  askRows,
+  bidRows,
+  maxSize,
+  bestAsk,
+  bestBid,
+  last,
+  spread,
+  loading,
+  scrubbing,
+  askScrollRef,
+  bidScrollRef,
+}: {
+  shortName: string;
+  askRows: LadderLevel[];
+  bidRows: LadderLevel[];
+  maxSize: number;
+  bestAsk: number | null | undefined;
+  bestBid: number | null | undefined;
+  last: number | null;
+  spread: number | null;
+  loading: boolean;
+  scrubbing: boolean;
+  askScrollRef: RefObject<HTMLDivElement | null>;
+  bidScrollRef: RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <div className={`poly-book${loading ? " poly-book-loading" : ""}${scrubbing ? " poly-book-scrubbing" : ""}`}>
+      <div className="poly-head">
+        <span className="poly-trade-h">Trade {shortName}</span>
+        <span>Price</span>
+        <span>Shares</span>
+        <span>Total</span>
+      </div>
+
+      <div className="poly-asks-wrap">
+        <div className="poly-side-scroll poly-side-scroll-ask" ref={askScrollRef}>
+          {askRows.length === 0 ? (
+            <div className="ob-empty">No asks</div>
+          ) : (
+            askRows.map((row) => (
+              <DepthRow
+                key={`a-${row.price}`}
+                side="ask"
+                price={row.price}
+                size={row.size}
+                total={row.total}
+                maxSize={maxSize}
+                highlight={bestAsk != null && Math.abs(row.price - bestAsk) < 1e-9}
+              />
+            ))
+          )}
+        </div>
+        <span className="poly-side-pill poly-side-pill-ask">Asks</span>
+      </div>
+
+      <div className="poly-spread">
+        <span>Last: {cents(last)}</span>
+        <span>Spread: {spread == null ? "—" : cents(spread)}</span>
+      </div>
+
+      <div className="poly-bids-wrap">
+        <span className="poly-side-pill poly-side-pill-bid">Bids</span>
+        <div className="poly-side-scroll poly-side-scroll-bid" ref={bidScrollRef}>
+          {bidRows.length === 0 ? (
+            <div className="ob-empty">No bids</div>
+          ) : (
+            bidRows.map((row) => (
+              <DepthRow
+                key={`b-${row.price}`}
+                side="bid"
+                price={row.price}
+                size={row.size}
+                total={row.total}
+                maxSize={maxSize}
+                highlight={bestBid != null && Math.abs(row.price - bestBid) < 1e-9}
+              />
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+});
 
 export function OrderbookScrubber({
   snapshots,
@@ -147,31 +235,72 @@ export function OrderbookScrubber({
   const spanMs = Math.max(0, t1 - t0);
 
   const [anchorAt, setAnchorAt] = useState<number | undefined>(seekAt);
+  /** Drives book fetch + parent sidebar — throttled while the thumb is dragged. */
+  const [loadAt, setLoadAt] = useState<number | undefined>(seekAt);
   const [playing, setPlaying] = useState(false);
   const [followLive, setFollowLive] = useState(!startAtBeginning);
   const [fineHalfMs, setFineHalfMs] = useState<(typeof FINE_WINDOWS)[number]["halfMs"]>(2 * 60_000);
   /** Fine window center in wall-clock time (not a per-token frame index). */
   const [fineAnchorAt, setFineAnchorAt] = useState<number | undefined>(seekAt);
+  const [scrubbing, setScrubbing] = useState(false);
   const fineLockRef = useRef<{ lo: number; hi: number } | null>(null);
   const initedRef = useRef(false);
   const askScrollRef = useRef<HTMLDivElement>(null);
   const bidScrollRef = useRef<HTMLDivElement>(null);
   const onFrameRef = useRef(onFrame);
   onFrameRef.current = onFrame;
+  const scrubbingRef = useRef(false);
+  const pendingLoadRef = useRef<number | null>(null);
   const queryClient = useQueryClient();
 
   const clockAt = clamp(anchorAt ?? (startAtBeginning ? t0 : t1), t0, t1 || t0);
-  // Last snap at or before the scrub time — same rule as sidebar/top-bar quote lookup.
+  const clockAtRef = useRef(clockAt);
+  clockAtRef.current = clockAt;
+  const resolvedLoadAt = clamp(loadAt ?? clockAt, t0, t1 || t0);
+  // UI frame index (slider / counter) vs load index (book + parent quotes).
   const safeIdx = frames.length ? upperBoundAt(frames, clockAt) : 0;
+  const loadIdx = frames.length ? upperBoundAt(frames, resolvedLoadAt) : 0;
   const snap = frames[safeIdx];
+  const loadSnap = frames[loadIdx] ?? snap;
+
+  const flushLoad = useCallback(
+    (at: number) => {
+      const next = clamp(at, t0, t1 || t0);
+      pendingLoadRef.current = null;
+      setLoadAt(next);
+      const idx = frames.length ? upperBoundAt(frames, next) : 0;
+      const frame = frames[idx];
+      if (frame) onFrameRef.current?.({ clockAt: next, snap: frame, idx });
+    },
+    [frames, t0, t1]
+  );
+
+  const scheduleFlush = useCallback(
+    (at: number, immediate = false) => {
+      pendingLoadRef.current = at;
+      // While dragging: keep the thumb live but defer book fetch + sidebar until release.
+      // Mid-drag fetches + full-page re-renders were freezing the scrubber.
+      if (!immediate && scrubbingRef.current) return;
+      flushLoad(at);
+    },
+    [flushLoad]
+  );
+
+  const beginScrub = () => {
+    scrubbingRef.current = true;
+    setScrubbing(true);
+  };
+
+  const endScrub = () => {
+    scrubbingRef.current = false;
+    setScrubbing(false);
+    scheduleFlush(pendingLoadRef.current ?? clockAtRef.current, true);
+  };
 
   const commitTime = (at: number, reanchorFine = false) => {
     const next = clamp(at, t0, t1 || t0);
     setAnchorAt(next);
-    // Push clock immediately so sidebar markets track the scrubber (don't wait for effect).
-    const idx = frames.length ? upperBoundAt(frames, next) : 0;
-    const frame = frames[idx];
-    if (frame) onFrameRef.current?.({ clockAt: next, snap: frame, idx });
+    scheduleFlush(next, !scrubbingRef.current);
     if (reanchorFine) {
       fineLockRef.current = null;
       setFineAnchorAt(next);
@@ -179,25 +308,25 @@ export function OrderbookScrubber({
   };
 
   const bookQuery = useQuery({
-    queryKey: ["snapshot-book", sport, snap?.day, snap?.id],
+    queryKey: ["snapshot-book", sport, loadSnap?.day, loadSnap?.id],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (sport) params.set("sport", sport);
-      if (snap!.day) params.set("day", snap!.day);
+      if (loadSnap!.day) params.set("day", loadSnap!.day);
       const q = params.size ? `?${params}` : "";
-      const res = await fetch(`/api/snapshots/${snap!.id}${q}`);
+      const res = await fetch(`/api/snapshots/${loadSnap!.id}${q}`);
       if (!res.ok) throw new Error("snapshot unavailable");
       return res.json() as Promise<SnapshotRow>;
     },
-    enabled: Boolean(snap?.id),
+    enabled: Boolean(loadSnap?.id),
     staleTime: Infinity,
     // Keep the previous ladder painted while the next frame's depth loads —
     // timeline rows only have best bid/ask (empty bids/asks), which looks "flat".
     placeholderData: keepPreviousData,
   });
 
-  const displaySnap: SnapshotRow | undefined = bookQuery.data ?? snap ?? undefined;
-  const ladderReady = Boolean(bookQuery.data && snap && bookQuery.data.id === snap.id);
+  const displaySnap: SnapshotRow | undefined = bookQuery.data ?? loadSnap ?? snap ?? undefined;
+  const ladderReady = Boolean(bookQuery.data && loadSnap && bookQuery.data.id === loadSnap.id);
 
   // First load only — never reset bars when the token series changes.
   useEffect(() => {
@@ -209,11 +338,13 @@ export function OrderbookScrubber({
       if (seekAt != null && Number.isFinite(seekAt) && seekAt < tip - 2_000) {
         const at = clamp(seekAt, t0, tip);
         setAnchorAt(at);
+        setLoadAt(at);
         setFineAnchorAt(at);
         setFollowLive(false);
         return;
       }
       setAnchorAt(tip);
+      setLoadAt(tip);
       setFineAnchorAt(tip);
       setFollowLive(true);
       return;
@@ -221,6 +352,7 @@ export function OrderbookScrubber({
     if (seekAt != null && Number.isFinite(seekAt)) {
       const at = clamp(seekAt, t0, t1);
       setAnchorAt(at);
+      setLoadAt(at);
       setFineAnchorAt(at);
       setFollowLive(false);
       return;
@@ -228,19 +360,20 @@ export function OrderbookScrubber({
     const initIdx = pickInitialFrame(frames, startAtBeginning);
     const at = clamp(frames[initIdx]!.capturedAt, t0, t1);
     setAnchorAt(at);
+    setLoadAt(at);
     setFineAnchorAt(at);
     setFollowLive(false);
   }, [frames, window, t0, t1, seekAt, startAtBeginning]);
 
   useEffect(() => {
-    if (!Number.isFinite(clockAt) || !frames.length) return;
+    if (!Number.isFinite(resolvedLoadAt) || !frames.length) return;
     // Shared scrub clock — parent maps all market prices from the dense quote series.
-    onFrameRef.current?.({ clockAt, snap: displaySnap ?? snap!, idx: safeIdx });
-  }, [clockAt, frames.length]);
+    onFrameRef.current?.({ clockAt: resolvedLoadAt, snap: displaySnap ?? loadSnap!, idx: loadIdx });
+  }, [resolvedLoadAt, frames.length]);
 
   useEffect(() => {
-    if (!frames.length) return;
-    for (const j of [safeIdx - 1, safeIdx + 1, safeIdx - 2, safeIdx + 2]) {
+    if (!frames.length || scrubbing) return;
+    for (const j of [loadIdx - 1, loadIdx + 1, loadIdx - 2, loadIdx + 2]) {
       if (j < 0 || j >= frames.length) continue;
       const id = frames[j]!.id;
       const day = frames[j]!.day;
@@ -258,7 +391,7 @@ export function OrderbookScrubber({
         staleTime: Infinity,
       });
     }
-  }, [safeIdx, frames, queryClient, sport]);
+  }, [loadIdx, frames, queryClient, sport, scrubbing]);
 
   useEffect(() => {
     if (!playing || frames.length < 2) return;
@@ -269,10 +402,13 @@ export function OrderbookScrubber({
         if (idx >= frames.length - 1) {
           setPlaying(false);
           setFollowLive(true);
-          return t1;
+          const tip = t1;
+          setLoadAt(tip);
+          return tip;
         }
-        const nextAt = frames[idx + 1]!.capturedAt;
-        return clamp(nextAt, t0, t1);
+        const nextAt = clamp(frames[idx + 1]!.capturedAt, t0, t1);
+        setLoadAt(nextAt);
+        return nextAt;
       });
     }, 700);
     return () => clearInterval(timer);
@@ -281,6 +417,7 @@ export function OrderbookScrubber({
   useEffect(() => {
     if (!followLive || spanMs <= 0) return;
     setAnchorAt(t1);
+    setLoadAt(t1);
     setFineAnchorAt(t1);
     fineLockRef.current = null;
   }, [followLive, t1, spanMs]);
@@ -317,7 +454,7 @@ export function OrderbookScrubber({
     if (!askRoot || !bidRoot) return;
     askRoot.scrollTop = askRoot.scrollHeight;
     bidRoot.scrollTop = 0;
-  }, [safeIdx, displaySnap?.id, askRows.length, bidRows.length]);
+  }, [displaySnap?.id, askRows.length, bidRows.length]);
 
   if (!frames.length || !snap || !displaySnap || !window) {
     return (
@@ -433,8 +570,13 @@ export function OrderbookScrubber({
             min={0}
             max={COARSE_STEPS}
             value={coarseValue}
+            onPointerDown={beginScrub}
+            onPointerUp={() => {
+              pinFineToCurrent();
+              endScrub();
+            }}
+            onPointerCancel={endScrub}
             onChange={(e) => scrubCoarseValue(Number(e.target.value), false)}
-            onPointerUp={pinFineToCurrent}
             onKeyUp={pinFineToCurrent}
             aria-label="Match timeline"
             title="Match timeline — Fine window re-centers when you release"
@@ -488,9 +630,18 @@ export function OrderbookScrubber({
             step={1}
             value={fineDisabled ? 0 : fineValue}
             disabled={fineDisabled}
-            onPointerDown={beginFineDrag}
-            onPointerUp={endFineDrag}
-            onPointerCancel={endFineDrag}
+            onPointerDown={() => {
+              beginScrub();
+              beginFineDrag();
+            }}
+            onPointerUp={() => {
+              endFineDrag();
+              endScrub();
+            }}
+            onPointerCancel={() => {
+              endFineDrag();
+              endScrub();
+            }}
             onChange={(e) => scrubFineValue(Number(e.target.value))}
             aria-label="Fine timeline around pinned window"
             title={fineDisabled ? "Window too small — try ±5m" : `Fine scrub ${fineLabel}`}
@@ -563,61 +714,20 @@ export function OrderbookScrubber({
         </div>
       </div>
 
-      <div className={`poly-book${bookQuery.isFetching && !ladderReady ? " poly-book-loading" : ""}`}>
-        <div className="poly-head">
-          <span className="poly-trade-h">Trade {shortName}</span>
-          <span>Price</span>
-          <span>Shares</span>
-          <span>Total</span>
-        </div>
-
-        <div className="poly-asks-wrap">
-          <div className="poly-side-scroll poly-side-scroll-ask" ref={askScrollRef}>
-            {askRows.length === 0 ? (
-              <div className="ob-empty">No asks</div>
-            ) : (
-              askRows.map((row) => (
-                <DepthRow
-                  key={`a-${row.price}`}
-                  side="ask"
-                  price={row.price}
-                  size={row.size}
-                  total={row.total}
-                  maxSize={maxSize}
-                  highlight={displaySnap.bestAsk != null && Math.abs(row.price - displaySnap.bestAsk) < 1e-9}
-                />
-              ))
-            )}
-          </div>
-          <span className="poly-side-pill poly-side-pill-ask">Asks</span>
-        </div>
-
-        <div className="poly-spread">
-          <span>Last: {cents(last)}</span>
-          <span>Spread: {spread == null ? "—" : cents(spread)}</span>
-        </div>
-
-        <div className="poly-bids-wrap">
-          <span className="poly-side-pill poly-side-pill-bid">Bids</span>
-          <div className="poly-side-scroll poly-side-scroll-bid" ref={bidScrollRef}>
-            {bidRows.length === 0 ? (
-              <div className="ob-empty">No bids</div>
-            ) : (
-              bidRows.map((row) => (
-                <DepthRow
-                  key={`b-${row.price}`}
-                  side="bid"
-                  price={row.price}
-                  size={row.size}
-                  total={row.total}
-                  maxSize={maxSize}
-                  highlight={displaySnap.bestBid != null && Math.abs(row.price - displaySnap.bestBid) < 1e-9}
-                />
-              ))
-            )}
-          </div>
-        </div>
-      </div>
+      <BookLadder
+        shortName={shortName}
+        askRows={askRows}
+        bidRows={bidRows}
+        maxSize={maxSize}
+        bestAsk={displaySnap.bestAsk}
+        bestBid={displaySnap.bestBid}
+        last={last}
+        spread={spread}
+        loading={bookQuery.isFetching && !ladderReady}
+        scrubbing={scrubbing}
+        askScrollRef={askScrollRef}
+        bidScrollRef={bidScrollRef}
+      />
     </div>
   );
 }

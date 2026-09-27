@@ -292,8 +292,20 @@ async function runSport(opts: Options, hub: MonitorHub, sport: MonitorSport) {
   const parsedAll = parseHistorySportEvents(sport, gammaEvents);
   const parsed =
     opts.eventLimit != null ? parsedAll.slice(0, opts.eventLimit) : parsedAll;
-  console.log(`  parsed: ${parsed.length} events with tradeable markets` +
-    (parsedAll.length !== parsed.length ? ` (of ${parsedAll.length})` : ""));
+  const dateKeys = [
+    ...new Set(
+      parsedAll
+        .map((e) => (e.eventDate ?? e.startTime?.slice(0, 10) ?? "").slice(0, 10))
+        .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)),
+    ),
+  ].sort();
+  console.log(
+    `  parsed: ${parsed.length} events with tradeable markets` +
+      (parsedAll.length !== parsed.length ? ` (of ${parsedAll.length})` : "") +
+      (dateKeys.length
+        ? `  span=${dateKeys[0]}..${dateKeys[dateKeys.length - 1]} (${dateKeys.length} days)`
+        : ""),
+  );
   if (gammaEvents.length > 0 && parsedAll.length === 0) {
     const sample = gammaEvents.slice(0, 3).map((e) => e.title);
     console.log(`  ! parse dropped all — sample titles: ${sample.join(" | ")}`);

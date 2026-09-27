@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { EventOrderbook } from "@/components/EventOrderbook";
 import { quoteAtTime } from "@/lib/history";
@@ -79,7 +79,10 @@ export default function EventDetail({ eventId }: { eventId: string }) {
   });
 
   const onFrame = useCallback((capturedAt: number) => {
-    setFrameAt((prev) => (prev === capturedAt ? prev : capturedAt));
+    // Keep scrubber paint high-priority; sidebar/scoreboard can catch up.
+    startTransition(() => {
+      setFrameAt((prev) => (prev === capturedAt ? prev : capturedAt));
+    });
   }, []);
 
   const data = event.data;

@@ -378,23 +378,86 @@ export function eventInTimeWindow(event: GammaEvent, fromMs: number, toMs: numbe
 
 async function fetchTagPages(
   tag: string,
-  opts: { closed: boolean; liveOnly?: boolean; maxPages?: number; timeoutMs?: number },
+  opts: {
+    closed: boolean;
+    liveOnly?: boolean;
+    maxPages?: number;
+    untilMs?: number | null;
+    /** Optional closed-window bounds (ISO). Required for deep history — Gamma offset max ≈ 2000. */
+    endDateMin?: string | null;
+    endDateMax?: string | null;
+    timeoutMs?: number;
+  },
 ): Promise<GammaEvent[]> {
   const out: GammaEvent[] = [];
   const maxPages = opts.maxPages ?? 8;
   const timeoutMs = opts.timeoutMs ?? 25_000;
   for (let page = 0; page < maxPages; page++) {
     const offset = page * 50;
-    const liveQ = opts.liveOnly ? "&live=true" : "";
-    const closedQ = opts.closed ? "closed=true" : "closed=false&active=true";
-    const order = opts.closed ? "endDate&ascending=false" : "startTime&ascending=true";
-    const url = `${GAMMA}/events?${closedQ}${liveQ}&limit=50&offset=${offset}&tag_slug=${encodeURIComponent(tag)}&order=${order}`;
-    const pageRows = await httpGetJson<GammaEvent[]>(url, { timeoutMs });
+    // Gamma rejects offset >= ~2050 with HTTP 422 — never request past 2000.
+    if (offset > 2000) break;
+
+    const params = new URLSearchParams();
+    params.set("closed", opts.closed ? "true" : "false");
+    if (!opts.closed) params.set("active", "true");
+    if (opts.liveOnly) params.set("live", "true");
+    params.set("limit", "50");
+    params.set("offset", String(offset));
+    params.set("tag_slug", tag);
+    params.set("order", opts.closed ? "endDate" : "startTime");
+    params.set("ascending", opts.closed ? "false" : "true");
+    if (opts.closed && opts.endDateMin) params.set("end_date_min", opts.endDateMin);
+    if (opts.closed && opts.endDateMax) params.set("end_date_max", opts.endDateMax);
+
+    const url = `${GAMMA}/events?${params}`;
+    let pageRows: GammaEvent[];
+    try {
+      pageRows = await httpGetJson<GammaEvent[]>(url, { timeoutMs });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      // Offset ceiling or transient — keep pages already collected.
+      if (/HTTP 422/.test(msg)) break;
+      throw error;
+    }
     if (!Array.isArray(pageRows) || pageRows.length === 0) break;
     out.push(...pageRows);
+
+    if (opts.closed && opts.untilMs != null && !opts.endDateMin) {
+      const times = pageRows.map((e) => eventTimeMs(e)).filter((t): t is number => t != null);
+      if (times.length > 0 && Math.max(...times) < opts.untilMs) break;
+    }
+
     if (pageRows.length < 50) break;
   }
   return out;
+}
+
+/** Closed events for one UTC calendar day via end_date_min/max (bypasses offset=2000 wall). */
+async function fetchClosedTagDay(tag: string, day: string): Promise<GammaEvent[]> {
+  return fetchTagPages(tag, {
+    closed: true,
+    maxPages: 41, // offsets 0..2000
+    endDateMin: `${day}T00:00:00Z`,
+    endDateMax: `${day}T23:59:59Z`,
+  });
+}
+
+function utcDaysInclusive(fromMs: number, toMs: number): string[] {
+  const days: string[] = [];
+  const start = Date.UTC(
+    new Date(fromMs).getUTCFullYear(),
+    new Date(fromMs).getUTCMonth(),
+    new Date(fromMs).getUTCDate(),
+  );
+  const end = Date.UTC(
+    new Date(toMs).getUTCFullYear(),
+    new Date(toMs).getUTCMonth(),
+    new Date(toMs).getUTCDate(),
+  );
+  for (let t = start; t <= end; t += 86_400_000) {
+    days.push(new Date(t).toISOString().slice(0, 10));
+  }
+  return days;
 }
 
 export type GammaCatalogOpts = {
@@ -412,34 +475,53 @@ export async function fetchSportCatalog(opts: GammaCatalogOpts): Promise<GammaEv
 
   const wantOpen = opts.status === "open" || opts.status === "both";
   const wantClosed = opts.status === "closed" || opts.status === "both";
+  const days = utcDaysInclusive(opts.fromMs, opts.toMs);
+
+  console.log(
+    `  gamma fetch: open=${wantOpen} closedDays=${wantClosed ? days.length : 0} ` +
+      `(${days[0] ?? "-"}..${days[days.length - 1] ?? "-"})`,
+  );
 
   const jobs: Array<Promise<GammaEvent[]>> = [];
   for (const tag of tags) {
     if (wantOpen) {
-      jobs.push(fetchTagPages(tag, { closed: false, liveOnly: true, maxPages: 4 }));
-      jobs.push(fetchTagPages(tag, { closed: false, liveOnly: false, maxPages: 6 }));
+      jobs.push(fetchTagPages(tag, { closed: false, liveOnly: true, maxPages: 6 }));
+      jobs.push(fetchTagPages(tag, { closed: false, liveOnly: false, maxPages: 12 }));
     }
     if (wantClosed) {
-      jobs.push(fetchTagPages(tag, { closed: true, maxPages: 10 }));
+      // One Gamma query per calendar day — required because global offset max ≈ 2000
+      // only covers ~1 week of high-volume tags (soccer/tennis props).
+      for (const day of days) {
+        jobs.push(fetchClosedTagDay(tag, day));
+      }
     }
   }
 
-  const results = await Promise.allSettled(jobs);
+  // Bound concurrency so we don't stampede Gamma (weather × 30 days is fine sequentially-ish).
+  const results: Array<PromiseSettledResult<GammaEvent[]>> = [];
+  const concurrency = 6;
+  for (let i = 0; i < jobs.length; i += concurrency) {
+    const chunk = jobs.slice(i, i + concurrency);
+    results.push(...(await Promise.allSettled(chunk)));
+  }
+
+  let fetchErrors = 0;
   for (const result of results) {
-    if (result.status !== "fulfilled") continue;
+    if (result.status !== "fulfilled") {
+      fetchErrors++;
+      continue;
+    }
     for (const event of result.value) {
       if (!event?.id) continue;
       if (!eventInTimeWindow(event, opts.fromMs, opts.toMs)) continue;
       byId.set(String(event.id), event);
     }
   }
+  if (fetchErrors) console.warn(`  gamma fetch: ${fetchErrors} chunk(s) failed`);
 
   let out = [...byId.values()];
-  // Prefer real kickoff times; do not hard-limit here — download.ts limits after parse
-  // so prop-only siblings don't crowd out moneyline matches.
   out.sort((a, b) => (eventTimeMs(b) ?? 0) - (eventTimeMs(a) ?? 0));
   if (opts.limit != null && out.length > opts.limit * 8) {
-    // Soft cap raw fanout to keep Gamma calls sane when limit is tiny.
     out = out.slice(0, Math.max(opts.limit * 8, 40));
   }
   return out;
