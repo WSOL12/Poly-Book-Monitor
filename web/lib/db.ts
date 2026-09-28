@@ -208,6 +208,25 @@ function sanitizeQuote(bestBid: number | null, bestAsk: number | null) {
   return { bestBid, bestAsk };
 }
 
+/**
+ * True top-of-book from L2 JSON when present.
+ * Stored bb/ba columns are often stale (~50¢) while bj/aj still hold the real ladder.
+ */
+function tobFromObRow(row: {
+  bestBid: number | null;
+  bestAsk: number | null;
+  bidsJson?: string | null;
+  asksJson?: string | null;
+}): { bestBid: number | null; bestAsk: number | null } {
+  if (row.bidsJson != null && row.asksJson != null && row.bidsJson !== "" && row.asksJson !== "") {
+    const clean = sanitizeBook(levelsFromJson(row.bidsJson), levelsFromJson(row.asksJson));
+    if (clean.bestBid != null || clean.bestAsk != null) {
+      return { bestBid: clean.bestBid, bestAsk: clean.bestAsk };
+    }
+  }
+  return sanitizeQuote(row.bestBid, row.bestAsk);
+}
+
 function openDay(sport: Sport, dayOrMonth: string, readonly = true) {
   const month = /^\d{4}-\d{2}-\d{2}$/.test(dayOrMonth) ? dayOrMonth.slice(0, 7) : dayOrMonth;
   const candidates: string[] = [dbPathForMonth(sport, month)];
@@ -840,32 +859,19 @@ export function getEventQuoteSeries(eventId: string): Record<
     }>;
     if (!tokens.length) return {};
 
-    const event = db
-      .prepare(`SELECT st AS startTime, fa AS finishedAt FROM ev WHERE id = ?`)
-      .get(eventId) as { startTime: string | null; finishedAt: number | null } | undefined;
-
     const span = db
       .prepare(`SELECT MIN(ts) AS a, MAX(ts) AS b FROM ob WHERE eid = ?`)
       .get(eventId) as { a: number | null; b: number | null };
 
     if (span?.a == null || span?.b == null) return {};
 
-    const startMs = event?.startTime ? Date.parse(event.startTime) : NaN;
-    const finishMs = event?.finishedAt != null ? Number(event.finishedAt) : NaN;
-    let lo = span.a;
-    let hi = span.b;
-    if (Number.isFinite(startMs) && Number.isFinite(finishMs) && finishMs > startMs) {
-      lo = Math.max(span.a, startMs - 5 * 60_000);
-      // Prefer last score / recording over a premature finished_at for the series window.
-      hi = span.b;
-      const matchHi = Math.min(span.b, finishMs + 30 * 60_000);
-      if (matchHi - lo >= 0.2 * (span.b - span.a)) {
-        hi = Math.max(matchHi, Math.min(span.b, startMs + 3 * 60 * 60_000));
-      }
-    }
+    // Full recorded span — same books the scrubber walks. Cropping to kickoff±pad
+    // dropped prematch/void price motion (stored bb/ba often stuck near 50¢).
+    const lo = span.a;
+    const hi = span.b;
 
     const stmt = db.prepare(
-      `SELECT ts AS capturedAt, bb AS bestBid, ba AS bestAsk
+      `SELECT ts AS capturedAt, bb AS bestBid, ba AS bestAsk, bj AS bidsJson, aj AS asksJson
        FROM ob
        WHERE tid = ? AND ts >= ? AND ts <= ?
        ORDER BY ts ASC`
@@ -881,17 +887,18 @@ export function getEventQuoteSeries(eventId: string): Record<
         capturedAt: number;
         bestBid: number | null;
         bestAsk: number | null;
+        bidsJson: string | null;
+        asksJson: string | null;
       }>;
       const series: Array<{ capturedAt: number; bestBid: number | null; bestAsk: number | null }> =
         [];
       let lastKeep = -Infinity;
       for (const row of rows) {
+        const q = tobFromObRow(row);
         const prev = series[series.length - 1];
-        const changed =
-          !prev || prev.bestBid !== row.bestBid || prev.bestAsk !== row.bestAsk;
+        const changed = !prev || prev.bestBid !== q.bestBid || prev.bestAsk !== q.bestAsk;
         // Keep every quote change; heartbeat every 2s so scrubbing always has a nearby sample.
         if (!changed && row.capturedAt - lastKeep < 2_000) continue;
-        const q = sanitizeQuote(row.bestBid, row.bestAsk);
         series.push({
           capturedAt: row.capturedAt,
           bestBid: q.bestBid,
@@ -924,7 +931,7 @@ export function getEventQuotesAt(
     if (!tokens.length || !Number.isFinite(atMs)) return {};
 
     const stmt = db.prepare(
-      `SELECT bb AS bestBid, ba AS bestAsk, ts AS capturedAt
+      `SELECT bb AS bestBid, ba AS bestAsk, bj AS bidsJson, aj AS asksJson, ts AS capturedAt
        FROM ob WHERE tid = ? AND ts <= ? ORDER BY ts DESC LIMIT 1`
     );
 
@@ -932,10 +939,16 @@ export function getEventQuotesAt(
       {};
     for (const { tokenId } of tokens) {
       const row = stmt.get(tokenId, atMs) as
-        | { bestBid: number | null; bestAsk: number | null; capturedAt: number }
+        | {
+            bestBid: number | null;
+            bestAsk: number | null;
+            bidsJson: string | null;
+            asksJson: string | null;
+            capturedAt: number;
+          }
         | undefined;
       if (!row) continue;
-      const q = sanitizeQuote(row.bestBid, row.bestAsk);
+      const q = tobFromObRow(row);
       out[tokenId] = {
         capturedAt: row.capturedAt,
         bestBid: q.bestBid,

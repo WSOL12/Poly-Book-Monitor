@@ -216,7 +216,7 @@ export function OrderbookScrubber({
   matchStart?: string | null;
   matchEnd?: number | null;
   seekAt?: number;
-  onFrame?: (payload: { clockAt: number; snap: SnapshotRow; idx: number }) => void;
+  onFrame?: (payload: { clockAt: number; snap?: SnapshotRow; idx: number }) => void;
   /** Required for per-sport DB lookup of full book frames. */
   sport?: string;
 }) {
@@ -270,20 +270,55 @@ export function OrderbookScrubber({
       setLoadAt(next);
       const idx = frames.length ? upperBoundAt(frames, next) : 0;
       const frame = frames[idx];
-      if (frame) onFrameRef.current?.({ clockAt: next, snap: frame, idx });
+      // Clock only here — L2 TOB is pushed once the depth book for this frame loads.
+      if (frame) onFrameRef.current?.({ clockAt: next, idx });
     },
     [frames, t0, t1]
   );
 
+  const emitClock = useCallback(
+    (at: number) => {
+      const next = clamp(at, t0, t1 || t0);
+      const idx = frames.length ? upperBoundAt(frames, next) : 0;
+      onFrameRef.current?.({ clockAt: next, idx });
+    },
+    [frames, t0, t1]
+  );
+
+  const clockRafRef = useRef<number | null>(null);
+  const pendingClockRef = useRef<number | null>(null);
+
+  const scheduleClock = useCallback(
+    (at: number, immediate = false) => {
+      pendingClockRef.current = at;
+      if (immediate) {
+        if (clockRafRef.current != null) {
+          cancelAnimationFrame(clockRafRef.current);
+          clockRafRef.current = null;
+        }
+        emitClock(at);
+        return;
+      }
+      if (clockRafRef.current != null) return;
+      clockRafRef.current = requestAnimationFrame(() => {
+        clockRafRef.current = null;
+        const pending = pendingClockRef.current;
+        if (pending != null) emitClock(pending);
+      });
+    },
+    [emitClock]
+  );
+
   const scheduleFlush = useCallback(
     (at: number, immediate = false) => {
+      // Sidebar / all-market quotes follow the thumb immediately (rAF-throttled).
+      scheduleClock(at, immediate);
       pendingLoadRef.current = at;
-      // While dragging: keep the thumb live but defer book fetch + sidebar until release.
-      // Mid-drag fetches + full-page re-renders were freezing the scrubber.
+      // Depth book fetch stays deferred while dragging — that was freezing the scrubber.
       if (!immediate && scrubbingRef.current) return;
       flushLoad(at);
     },
-    [flushLoad]
+    [flushLoad, scheduleClock]
   );
 
   const beginScrub = () => {
@@ -368,18 +403,14 @@ export function OrderbookScrubber({
   useEffect(() => {
     if (!Number.isFinite(resolvedLoadAt) || !frames.length) return;
     // Shared scrub clock — parent maps all market prices from the dense quote series.
-    onFrameRef.current?.({ clockAt: resolvedLoadAt, snap: displaySnap ?? loadSnap!, idx: loadIdx });
-  }, [resolvedLoadAt, frames.length]);
+    onFrameRef.current?.({ clockAt: resolvedLoadAt, idx: loadIdx });
+  }, [resolvedLoadAt, frames.length, loadIdx]);
 
-  // When the full L2 book arrives, push its sanitized TOB (may differ from timeline bb/ba).
   useEffect(() => {
-    if (!loadSnap || !bookQuery.data || bookQuery.data.id !== loadSnap.id) return;
-    onFrameRef.current?.({
-      clockAt: resolvedLoadAt,
-      snap: bookQuery.data,
-      idx: loadIdx,
-    });
-  }, [bookQuery.data, loadSnap?.id, resolvedLoadAt, loadIdx]);
+    return () => {
+      if (clockRafRef.current != null) cancelAnimationFrame(clockRafRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!frames.length || scrubbing) return;

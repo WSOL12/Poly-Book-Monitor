@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { startTransition, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { EventOrderbook } from "@/components/EventOrderbook";
 import { quoteAtTime } from "@/lib/history";
@@ -55,7 +55,7 @@ export default function EventDetail({ eventId }: { eventId: string }) {
 
   // One dense series per token — scrubbing updates all market prices locally (no per-tick fetch).
   const quoteSeries = useQuery({
-    queryKey: ["event-quote-series", eventId],
+    queryKey: ["event-quote-series", eventId, "l2"],
     queryFn: async () => {
       const res = await fetch(`/api/events/${eventId}/quotes`);
       if (!res.ok) throw new Error("quotes unavailable");
@@ -76,10 +76,8 @@ export default function EventDetail({ eventId }: { eventId: string }) {
   });
 
   const onFrame = useCallback((capturedAt: number) => {
-    // Keep scrubber paint high-priority; sidebar/scoreboard can catch up.
-    startTransition(() => {
-      setFrameAt((prev) => (prev === capturedAt ? prev : capturedAt));
-    });
+    // Must stay in lockstep with the scrub thumb — startTransition left sidebar quotes behind.
+    setFrameAt((prev) => (prev === capturedAt ? prev : capturedAt));
   }, []);
 
   const data = event.data;
@@ -329,10 +327,6 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                             ? "No"
                             : "Yes"
                           : token.label;
-                      const showBidAsk =
-                        market.marketType === "total" ||
-                        market.marketType === "set_handicap" ||
-                        market.marketType === "game_handicap";
                       return (
                         <button
                           key={token.tokenId}
@@ -341,15 +335,11 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                           onClick={() => setTokenId(token.tokenId)}
                         >
                           <span>{name}</span>
-                          {showBidAsk ? (
-                            <span className="aside-quotes mono">
-                              <span className="aside-bid">{cents(bid)}</span>
-                              <span className="aside-quote-sep">/</span>
-                              <span className="aside-ask">{cents(ask)}</span>
-                            </span>
-                          ) : (
-                            <span className="aside-ask mono">{cents(ask ?? bid)}</span>
-                          )}
+                          <span className="aside-quotes mono">
+                            <span className="aside-bid">{cents(bid)}</span>
+                            <span className="aside-quote-sep">/</span>
+                            <span className="aside-ask">{cents(ask)}</span>
+                          </span>
                         </button>
                       );
                     })}
