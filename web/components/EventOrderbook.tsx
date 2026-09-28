@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { OrderbookChart } from "@/components/OrderbookChart";
 import { OrderbookScrubber } from "@/components/OrderbookScrubber";
@@ -83,6 +83,11 @@ export function EventOrderbook({
 }) {
   const [internalId, setInternalId] = useState(tokens[0]?.tokenId ?? "");
   const [tab, setTab] = useState<"book" | "graph">("book");
+  /** TOB from the scrubber's loaded depth book (selected token only). */
+  const [bookTob, setBookTob] = useState<{
+    bestBid: number | null;
+    bestAsk: number | null;
+  } | null>(null);
   const activeId = tokenId ?? internalId;
   const setActiveId = onTokenChange ?? setInternalId;
 
@@ -93,6 +98,10 @@ export function EventOrderbook({
       tokens[0]?.tokenId ??
       "");
   const active = tokens.find((t) => t.tokenId === resolvedId) ?? null;
+
+  useEffect(() => {
+    setBookTob(null);
+  }, [resolvedId]);
   const moneyline = useMemo(() => tokens.filter((t) => t.marketType === "moneyline"), [tokens]);
   const weatherBuckets = useMemo(() => tokens.filter((t) => t.marketType === "weather"), [tokens]);
 
@@ -138,8 +147,13 @@ export function EventOrderbook({
   });
 
   const handleFrame = useCallback(
-    (payload: { clockAt: number }) => {
+    (payload: { clockAt: number; snap?: { bestBid: number | null; bestAsk: number | null } }) => {
       onFrame?.(payload.clockAt);
+      // Prefer the loaded L2 book's TOB for the selected outcome — quote-series bb/ba
+      // can disagree with the depth ladder (stale columns vs sanitized levels).
+      if (payload.snap) {
+        setBookTob({ bestBid: payload.snap.bestBid, bestAsk: payload.snap.bestAsk });
+      }
     },
     [onFrame]
   );
@@ -284,12 +298,14 @@ export function EventOrderbook({
                 ? (weatherBuckets.find((t) => bucketKey(t) === key && t.side === activeSide) ?? token)
                 : token;
             const q = frameQuotes?.get(displayTok.tokenId);
-            const bid = q ? q.bestBid : displayTok.lastBid ?? null;
-            const ask = q ? q.bestAsk : displayTok.lastAsk ?? null;
             const on =
               token.marketType === "weather"
                 ? Boolean(active && bucketKey(active) === key)
                 : token.tokenId === resolvedId;
+            // Selected outcome: show the same TOB as the order-book ladder.
+            const fromBook = on && bookTob != null;
+            const bid = fromBook ? bookTob.bestBid : q ? q.bestBid : displayTok.lastBid ?? null;
+            const ask = fromBook ? bookTob.bestAsk : q ? q.bestAsk : displayTok.lastAsk ?? null;
             return (
               <button
                 key={token.marketType === "weather" ? key : token.tokenId}

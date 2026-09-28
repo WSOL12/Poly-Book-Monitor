@@ -5,12 +5,9 @@ import { startTransition, useCallback, useEffect, useMemo, useState } from "reac
 import { useQuery } from "@tanstack/react-query";
 import { EventOrderbook } from "@/components/EventOrderbook";
 import { quoteAtTime } from "@/lib/history";
-import { MatchRail } from "@/components/MatchRail";
 import { MatchScoreboard } from "@/components/MatchScoreboard";
-import { Topbar } from "@/components/Topbar";
 import { isEventLive, matchPhase, matchPhaseLabel } from "@/lib/live";
 import { ago, finishedWhen } from "@/lib/time";
-import type { Sport } from "@/lib/db";
 import { formatVolume } from "@/lib/league";
 import { resolveMatchEnd } from "@/lib/timeline";
 
@@ -174,29 +171,27 @@ export default function EventDetail({ eventId }: { eventId: string }) {
     : null;
 
   return (
-    <div className="shell shell-event">
-      <Topbar />
-
+    <>
       {!data ? (
-        <div className="panel-loading">Loading event…</div>
+        <div className="event-mid">
+          <div className="panel-loading">Loading event…</div>
+        </div>
       ) : (
         <>
-          <nav className="crumbs">
-            <div className="crumbs-left">
-              <Link href={`/${data.sport}`}>Matches</Link>
-              <span className="crumb-sep">/</span>
-              <span className="crumb-current">{data.title}</span>
-              <span className="crumb-meta">
-                <span className={`sport-chip sport-${data.sport}`}>{data.sport}</span>
-                <span className={live || phase === "live" ? "match-status is-live" : phase === "voided" ? "match-status is-void" : "match-status"}>
-                  {phase ? matchPhaseLabel(phase, data.sport, data.gameStatus, data.score, data.period) : live ? "Live" : "Finished"}
+          <div className="event-mid">
+            <nav className="crumbs">
+              <div className="crumbs-left">
+                <Link href={`/${data.sport}`}>Matches</Link>
+                <span className="crumb-sep">/</span>
+                <span className="crumb-current">{data.title}</span>
+                <span className="crumb-meta">
+                  <span className={`sport-chip sport-${data.sport}`}>{data.sport}</span>
+                  <span className={live || phase === "live" ? "match-status is-live" : phase === "retired" || phase === "canceled" ? "match-status is-void" : "match-status"}>
+                    {phase ? matchPhaseLabel(phase, data.sport, data.gameStatus, data.score, data.period) : live ? "Live" : "Finished"}
+                  </span>
                 </span>
-              </span>
-            </div>
-          </nav>
-
-          <div className="event-page">
-            <MatchRail activeEventId={eventId} sport={data.sport as Sport} />
+              </div>
+            </nav>
 
             <div className="event-main">
               {data.sport !== "weather" ? (
@@ -235,135 +230,137 @@ export default function EventDetail({ eventId }: { eventId: string }) {
                 {data.eventDate ? <span>{data.eventDate}</span> : null}
               </div>
             </div>
-
-            <aside className="event-aside">
-              <div className="aside-head">
-                <div className="aside-title-wrap">
-                  <h2 className="aside-title">Markets</h2>
-                  {data.volume != null && data.volume > 0 ? (
-                    <span className="aside-vol mono" title="Event total volume">
-                      {formatVolume(data.volume)}
-                    </span>
-                  ) : null}
-                </div>
-                <a
-                  className="btn btn-primary aside-poly"
-                  href={`https://polymarket.com/event/${data.slug}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Polymarket ↗
-                </a>
-              </div>
-              {data.markets
-                .slice()
-                .sort((a: { marketType: string; line: string | null }, b: { marketType: string; line: string | null }) => {
-                  const rank = (mt: string, line: string | null) => {
-                    if (mt === "moneyline") return 0;
-                    if (mt === "set_winner") return 10 + Number(line ?? 99);
-                    if (mt === "completed_match") return 20;
-                    if (mt === "set_handicap") return 30;
-                    if (mt === "game_handicap") return 40;
-                    if (mt === "total") {
-                      if (/^S1 Games/i.test(line ?? "")) return 50;
-                      if (/^S\d+ Games/i.test(line ?? "")) return 60;
-                      if (/^Sets/i.test(line ?? "")) return 70;
-                      if (/^Match/i.test(line ?? "")) return 80;
-                      return 90;
-                    }
-                    return 100;
-                  };
-                  const d = rank(a.marketType, a.line) - rank(b.marketType, b.line);
-                  if (d !== 0) return d;
-                  return (a.line ?? "").localeCompare(b.line ?? "", undefined, { numeric: true });
-                })
-                .map(
-                (market: {
-                  marketId: string;
-                  marketType: string;
-                  question: string;
-                  line: string | null;
-                  volume?: number | null;
-                  tokens: Array<{
-                    tokenId: string;
-                    side: string;
-                    label: string;
-                    lastBid: number | null;
-                    lastAsk: number | null;
-                  }>;
-                }) => (
-                  <div key={market.marketId} className="aside-market">
-                    <div className="aside-market-head">
-                      <span>
-                        {market.marketType === "moneyline"
-                          ? "Moneyline"
-                          : market.marketType === "weather"
-                            ? (market.line ?? "Temp")
-                            : market.marketType === "set_winner"
-                              ? `Set ${market.line ?? "?"} Winner`
-                              : market.marketType === "set_handicap"
-                                ? `Set Handicap${market.line ? ` ${market.line}` : ""}`
-                                : market.marketType === "game_handicap"
-                                  ? `Game Spread${market.line ? ` ${market.line}` : ""}`
-                                  : market.marketType === "completed_match"
-                                    ? "Completed Match"
-                                    : market.line && /O\/U/i.test(market.line)
-                                      ? market.line
-                                      : `O/U ${market.line ?? ""}`}
-                      </span>
-                      {market.volume != null && market.volume > 0 ? (
-                        <span className="aside-market-vol mono">{formatVolume(market.volume)}</span>
-                      ) : null}
-                    </div>
-                    <div className="aside-outcomes">
-                      {[...market.tokens]
-                        .sort((a, b) => {
-                          const rank = (s: string) =>
-                            s === "yes" || s === "over" || s === "home" ? 0 : s === "no" || s === "under" || s === "away" ? 1 : 2;
-                          return rank(a.side) - rank(b.side);
-                        })
-                        .map((token) => {
-                        const q = quoteById.get(token.tokenId);
-                        const bid = q ? q.bestBid : token.lastBid;
-                        const ask = q ? q.bestAsk : token.lastAsk;
-                        const name =
-                          market.marketType === "weather"
-                            ? token.side === "no"
-                              ? "No"
-                              : "Yes"
-                            : token.label;
-                        const showBidAsk =
-                          market.marketType === "total" ||
-                          market.marketType === "set_handicap" ||
-                          market.marketType === "game_handicap";
-                        return (
-                          <button
-                            key={token.tokenId}
-                            type="button"
-                            className={`aside-outcome ${token.tokenId === (tokenId || defaultTokenId) ? "aside-outcome-on" : ""}`}
-                            onClick={() => setTokenId(token.tokenId)}
-                          >
-                            <span>{name}</span>
-                            {showBidAsk ? (
-                              <span className="aside-quotes mono">
-                                <span className="aside-bid">{cents(bid)}</span>
-                                <span className="aside-quote-sep">/</span>
-                                <span className="aside-ask">{cents(ask)}</span>
-                              </span>
-                            ) : (
-                              <span className="aside-ask mono">{cents(ask ?? bid)}</span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )
-              )}
-            </aside>
           </div>
+
+          <aside className="event-aside">
+            <div className="aside-head">
+              <div className="aside-title-wrap">
+                <h2 className="aside-title">Markets</h2>
+                {data.volume != null && data.volume > 0 ? (
+                  <span className="aside-vol mono" title="Event total volume">
+                    {formatVolume(data.volume)}
+                  </span>
+                ) : null}
+              </div>
+              <a
+                className="btn btn-primary aside-poly"
+                href={`https://polymarket.com/event/${data.slug}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Polymarket ↗
+              </a>
+            </div>
+            <div className="aside-list">
+            {data.markets
+              .slice()
+              .sort((a: { marketType: string; line: string | null }, b: { marketType: string; line: string | null }) => {
+                const rank = (mt: string, line: string | null) => {
+                  if (mt === "moneyline") return 0;
+                  if (mt === "set_winner") return 10 + Number(line ?? 99);
+                  if (mt === "completed_match") return 20;
+                  if (mt === "set_handicap") return 30;
+                  if (mt === "game_handicap") return 40;
+                  if (mt === "total") {
+                    if (/^S1 Games/i.test(line ?? "")) return 50;
+                    if (/^S\d+ Games/i.test(line ?? "")) return 60;
+                    if (/^Sets/i.test(line ?? "")) return 70;
+                    if (/^Match/i.test(line ?? "")) return 80;
+                    return 90;
+                  }
+                  return 100;
+                };
+                const d = rank(a.marketType, a.line) - rank(b.marketType, b.line);
+                if (d !== 0) return d;
+                return (a.line ?? "").localeCompare(b.line ?? "", undefined, { numeric: true });
+              })
+              .map(
+              (market: {
+                marketId: string;
+                marketType: string;
+                question: string;
+                line: string | null;
+                volume?: number | null;
+                tokens: Array<{
+                  tokenId: string;
+                  side: string;
+                  label: string;
+                  lastBid: number | null;
+                  lastAsk: number | null;
+                }>;
+              }) => (
+                <div key={market.marketId} className="aside-market">
+                  <div className="aside-market-head">
+                    <span>
+                      {market.marketType === "moneyline"
+                        ? "Moneyline"
+                        : market.marketType === "weather"
+                          ? (market.line ?? "Temp")
+                          : market.marketType === "set_winner"
+                            ? `Set ${market.line ?? "?"} Winner`
+                            : market.marketType === "set_handicap"
+                              ? `Set Handicap${market.line ? ` ${market.line}` : ""}`
+                              : market.marketType === "game_handicap"
+                                ? `Game Spread${market.line ? ` ${market.line}` : ""}`
+                                : market.marketType === "completed_match"
+                                  ? "Completed Match"
+                                  : market.line && /O\/U/i.test(market.line)
+                                    ? market.line
+                                    : `O/U ${market.line ?? ""}`}
+                    </span>
+                    {market.volume != null && market.volume > 0 ? (
+                      <span className="aside-market-vol mono">{formatVolume(market.volume)}</span>
+                    ) : null}
+                  </div>
+                  <div className="aside-outcomes">
+                    {[...market.tokens]
+                      .sort((a, b) => {
+                        const rank = (s: string) =>
+                          s === "yes" || s === "over" || s === "home" ? 0 : s === "no" || s === "under" || s === "away" ? 1 : 2;
+                        return rank(a.side) - rank(b.side);
+                      })
+                      .map((token) => {
+                      const q = quoteById.get(token.tokenId);
+                      const bid = q ? q.bestBid : token.lastBid;
+                      const ask = q ? q.bestAsk : token.lastAsk;
+                      const name =
+                        market.marketType === "weather"
+                          ? token.side === "no"
+                            ? "No"
+                            : "Yes"
+                          : token.label;
+                      const showBidAsk =
+                        market.marketType === "total" ||
+                        market.marketType === "set_handicap" ||
+                        market.marketType === "game_handicap";
+                      return (
+                        <button
+                          key={token.tokenId}
+                          type="button"
+                          className={`aside-outcome ${token.tokenId === (tokenId || defaultTokenId) ? "aside-outcome-on" : ""}`}
+                          onClick={() => setTokenId(token.tokenId)}
+                        >
+                          <span>{name}</span>
+                          {showBidAsk ? (
+                            <span className="aside-quotes mono">
+                              <span className="aside-bid">{cents(bid)}</span>
+                              <span className="aside-quote-sep">/</span>
+                              <span className="aside-ask">{cents(ask)}</span>
+                            </span>
+                          ) : (
+                            <span className="aside-ask mono">{cents(ask ?? bid)}</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )
+            )}
+            </div>
+          </aside>
         </>
       )}
-    </div>
+    </>
   );
 }

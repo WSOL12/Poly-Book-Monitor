@@ -371,6 +371,16 @@ export function OrderbookScrubber({
     onFrameRef.current?.({ clockAt: resolvedLoadAt, snap: displaySnap ?? loadSnap!, idx: loadIdx });
   }, [resolvedLoadAt, frames.length]);
 
+  // When the full L2 book arrives, push its sanitized TOB (may differ from timeline bb/ba).
+  useEffect(() => {
+    if (!loadSnap || !bookQuery.data || bookQuery.data.id !== loadSnap.id) return;
+    onFrameRef.current?.({
+      clockAt: resolvedLoadAt,
+      snap: bookQuery.data,
+      idx: loadIdx,
+    });
+  }, [bookQuery.data, loadSnap?.id, resolvedLoadAt, loadIdx]);
+
   useEffect(() => {
     if (!frames.length || scrubbing) return;
     for (const j of [loadIdx - 1, loadIdx + 1, loadIdx - 2, loadIdx + 2]) {

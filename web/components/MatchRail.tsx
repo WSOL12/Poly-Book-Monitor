@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { MatchListControls } from "@/components/MatchListControls";
 import type { EventRow, Sport } from "@/lib/db";
@@ -26,8 +26,13 @@ function shortTitle(title: string) {
 function phaseShort(phase: MatchPhase) {
   if (phase === "open") return "Open";
   if (phase === "live") return "Live";
-  if (phase === "voided") return "Void";
+  if (phase === "retired") return "Retired";
+  if (phase === "canceled") return "Canceled";
   return "Done";
+}
+
+function scrollStorageKey(sport: string | undefined, tab: Tab) {
+  return `poly-match-rail-scroll:${sport ?? "all"}:${tab}`;
 }
 
 export function MatchRail({
@@ -41,6 +46,7 @@ export function MatchRail({
   const weatherMode = sport === "weather";
   const [tab, setTab] = useState<Tab | null>(null);
   const [filters, setFilters] = useState<MatchListFilters>(DEFAULT_MATCH_FILTERS);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const events = useQuery({
     queryKey: ["events", sport ?? "all", "rail"],
@@ -52,9 +58,10 @@ export function MatchRail({
       return body.events;
     },
     refetchInterval: 5_000,
+    staleTime: 4_000,
   });
 
-  const { open, live, voided, finished } = useMemo(
+  const { open, live, retired, canceled, finished } = useMemo(
     () => splitEvents(events.data ?? []),
     [events.data]
   );
@@ -68,9 +75,11 @@ export function MatchRail({
       ? open
       : effectiveTab === "live"
         ? live
-        : effectiveTab === "voided"
-          ? voided
-          : finished;
+        : effectiveTab === "retired"
+          ? retired
+          : effectiveTab === "canceled"
+            ? canceled
+            : finished;
 
   const leagueOptions = useMemo(() => listLeagueOptions(pool), [pool]);
   const rows = useMemo(() => filterAndSortEvents(pool, filters), [pool, filters]);
@@ -81,15 +90,40 @@ export function MatchRail({
       ? "open"
       : effectiveTab === "live"
         ? "live"
-        : effectiveTab === "voided"
-          ? "void"
-          : "finished";
+        : effectiveTab === "retired"
+          ? "retired"
+          : effectiveTab === "canceled"
+            ? "canceled"
+            : "finished";
+
+  // Keep list scroll when switching matches (layout remount / hard refresh fallback).
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el || events.isLoading) return;
+    const key = scrollStorageKey(sport, effectiveTab);
+    const saved = sessionStorage.getItem(key);
+    if (saved != null) {
+      const y = Number(saved);
+      if (Number.isFinite(y)) el.scrollTop = y;
+    }
+  }, [sport, effectiveTab, events.isLoading, rows.length]);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    const key = scrollStorageKey(sport, effectiveTab);
+    const onScroll = () => {
+      sessionStorage.setItem(key, String(el.scrollTop));
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [sport, effectiveTab]);
 
   return (
     <aside className="match-rail">
       <div className="match-rail-head">
         <h2 className="aside-title">Matches</h2>
-        <div className="match-rail-seg" role="tablist" aria-label="Match status">
+        <div className={`match-rail-seg${tennisMode ? " match-rail-seg-tennis" : ""}`} role="tablist" aria-label="Match status">
           {tennisMode || weatherMode ? (
             <button
               type="button"
@@ -118,12 +152,24 @@ export function MatchRail({
             <button
               type="button"
               role="tab"
-              aria-selected={effectiveTab === "voided"}
-              className={`match-rail-seg-btn${effectiveTab === "voided" ? " on" : ""}`}
-              onClick={() => setTab("voided")}
+              aria-selected={effectiveTab === "retired"}
+              className={`match-rail-seg-btn${effectiveTab === "retired" ? " on" : ""}`}
+              onClick={() => setTab("retired")}
             >
-              Void
-              <span className="match-rail-count">{voided.length}</span>
+              Ret
+              <span className="match-rail-count">{retired.length}</span>
+            </button>
+          ) : null}
+          {tennisMode ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={effectiveTab === "canceled"}
+              className={`match-rail-seg-btn${effectiveTab === "canceled" ? " on" : ""}`}
+              onClick={() => setTab("canceled")}
+            >
+              Can
+              <span className="match-rail-count">{canceled.length}</span>
             </button>
           ) : null}
           <button
@@ -152,7 +198,7 @@ export function MatchRail({
       ) : rows.length === 0 ? (
         <div className="match-rail-empty">No matches for these filters</div>
       ) : (
-        <div className="match-rail-list">
+        <div className="match-rail-list" ref={listRef}>
           {groups.map((group) => {
             const accent = leagueAccent(group.code);
             return (
@@ -174,13 +220,17 @@ export function MatchRail({
                   const phase = matchPhase(event);
                   const league = resolveLeague(event).label;
                   const hint =
-                    effectiveTab === "finished" || effectiveTab === "voided"
+                    effectiveTab === "finished" ||
+                    effectiveTab === "retired" ||
+                    effectiveTab === "canceled"
                       ? finishedWhen(event.finishedAt, event.eventDate)
                       : ago(event.lastSnapshotAt);
                   return (
                     <Link
                       key={event.eventId}
                       href={`/${event.sport}/event/${event.eventId}`}
+                      prefetch
+                      scroll={false}
                       className={`match-rail-item${on ? " match-rail-item-on" : ""}${
                         phase === "open" || phase === "live" ? " match-rail-item-live" : ""
                       }`}

@@ -70,7 +70,7 @@ function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
       <div className="match-side">
         <span
           className={`match-status${statusOn ? " is-live" : ""}${phase === "open" ? " is-open" : ""}${
-            phase === "voided" ? " is-void" : ""
+            phase === "retired" || phase === "canceled" ? " is-void" : ""
           }${tab !== "open" && tab !== "live" && event.lastSnapshotAt == null ? " is-void" : ""}`}
         >
           {tab !== "open" && tab !== "live" && event.lastSnapshotAt == null
@@ -78,7 +78,7 @@ function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
             : matchPhaseLabel(phase, event.sport, event.gameStatus, event.score, event.period)}
         </span>
         <span className="match-time mono">
-          {tab === "finished" || tab === "voided"
+          {tab === "finished" || tab === "retired" || tab === "canceled"
             ? finishedWhen(event.finishedAt, event.eventDate)
             : ago(event.lastSnapshotAt)}
         </span>
@@ -105,9 +105,17 @@ export function EventList({
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<MatchListFilters>(DEFAULT_MATCH_FILTERS);
 
-  const { open, live, voided, finished } = useMemo(() => splitEvents(events), [events]);
+  const { open, live, retired, canceled, finished } = useMemo(() => splitEvents(events), [events]);
   const pool =
-    tab === "open" ? open : tab === "live" ? live : tab === "voided" ? voided : finished;
+    tab === "open"
+      ? open
+      : tab === "live"
+        ? live
+        : tab === "retired"
+          ? retired
+          : tab === "canceled"
+            ? canceled
+            : finished;
 
   const searched = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -154,11 +162,13 @@ export function EventList({
       ? "Open"
       : tab === "live"
         ? "Live"
-        : tab === "voided"
-          ? "Void"
-          : weatherMode
-            ? "Finished"
-            : "Done";
+        : tab === "retired"
+          ? "Retired"
+          : tab === "canceled"
+            ? "Canceled"
+            : weatherMode
+              ? "Finished"
+              : "Done";
 
   return (
     <div className="match-panel">
@@ -192,12 +202,24 @@ export function EventList({
             <button
               type="button"
               role="tab"
-              aria-selected={tab === "voided"}
-              className={`seg-btn${tab === "voided" ? " on" : ""}`}
-              onClick={() => setTab("voided")}
+              aria-selected={tab === "retired"}
+              className={`seg-btn${tab === "retired" ? " on" : ""}`}
+              onClick={() => setTab("retired")}
             >
-              Void
-              <span className="seg-count">{voided.length}</span>
+              Retired
+              <span className="seg-count">{retired.length}</span>
+            </button>
+          ) : null}
+          {tennisMode ? (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "canceled"}
+              className={`seg-btn${tab === "canceled" ? " on" : ""}`}
+              onClick={() => setTab("canceled")}
+            >
+              Canceled
+              <span className="seg-count">{canceled.length}</span>
             </button>
           ) : null}
           <button
@@ -240,8 +262,10 @@ export function EventList({
             <button type="button" className="btn-text" onClick={() => setSearch("")}>
               Clear search
             </button>
-          ) : tab === "voided" && voided.length === 0 ? (
-            <p className="panel-empty-text">Canceled and retired matches land here.</p>
+          ) : tab === "retired" && retired.length === 0 ? (
+            <p className="panel-empty-text">Retired matches land here.</p>
+          ) : tab === "canceled" && canceled.length === 0 ? (
+            <p className="panel-empty-text">Canceled / walkover matches land here.</p>
           ) : tab === "finished" && finished.length === 0 ? (
             <p className="panel-empty-text">
               {tennisMode

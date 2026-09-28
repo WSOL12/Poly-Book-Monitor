@@ -10,5 +10,6 @@ export default async function SportEventRoute({
 }) {
   const { sport, eventId } = await params;
   if (!SPORTS.has(sport)) redirect(`/event/${eventId}`);
-  return <EventDetail key={eventId} eventId={eventId} />;
+  // No key={eventId} — EventDetail resets via useEffect; shell/MatchRail stay mounted.
+  return <EventDetail eventId={eventId} />;
 }
