@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { OrderbookChart } from "@/components/OrderbookChart";
+import { OrderbookChart, type ChartStyle } from "@/components/OrderbookChart";
 import { OrderbookScrubber } from "@/components/OrderbookScrubber";
 import type { FrameQuote } from "@/lib/history";
 
@@ -83,6 +83,7 @@ export function EventOrderbook({
 }) {
   const [internalId, setInternalId] = useState(tokens[0]?.tokenId ?? "");
   const [tab, setTab] = useState<"book" | "graph">("book");
+  const [chartStyle, setChartStyle] = useState<ChartStyle>("single");
   const activeId = tokenId ?? internalId;
   const setActiveId = onTokenChange ?? setInternalId;
 
@@ -123,6 +124,30 @@ export function EventOrderbook({
     return { yes, no, key };
   }, [active, weatherBuckets]);
 
+  /** Both outcomes for the selected market (home/away, yes/no, over/under). */
+  const chartPair = useMemo(() => {
+    if (!active) return null;
+    if (active.marketType === "weather") {
+      if (!weatherPair?.yes || !weatherPair?.no) return null;
+      return [weatherPair.yes, weatherPair.no] as const;
+    }
+    const peers = tokens.filter(
+      (t) => t.marketType === active.marketType && (t.line ?? "") === (active.line ?? "")
+    );
+    if (peers.length < 2) return null;
+    const rank = (s?: string) =>
+      s === "yes" || s === "over" || s === "home" ? 0 : s === "no" || s === "under" || s === "away" ? 1 : 2;
+    const sorted = [...peers].sort((a, b) => rank(a.side) - rank(b.side));
+    return [sorted[0]!, sorted[1]!] as const;
+  }, [active, tokens, weatherPair]);
+
+  const pairOtherId =
+    chartPair && chartPair[0].tokenId === resolvedId
+      ? chartPair[1].tokenId
+      : chartPair && chartPair[1].tokenId === resolvedId
+        ? chartPair[0].tokenId
+        : chartPair?.[1]?.tokenId ?? "";
+
   const history = useQuery({
     queryKey: ["token-history", resolvedId],
     queryFn: () => fetchHistory(resolvedId),
@@ -135,6 +160,14 @@ export function EventOrderbook({
     },
     staleTime: eventFinished && !(matchEnd != null && Date.now() - matchEnd < 12 * 60_000) ? Infinity : 4_000,
     // Keep the scrubber mounted while another market's history loads.
+    placeholderData: keepPreviousData,
+  });
+
+  const pairHistory = useQuery({
+    queryKey: ["token-history", pairOtherId],
+    queryFn: () => fetchHistory(pairOtherId),
+    enabled: Boolean(pairOtherId) && tab === "graph",
+    staleTime: eventFinished && !(matchEnd != null && Date.now() - matchEnd < 12 * 60_000) ? Infinity : 4_000,
     placeholderData: keepPreviousData,
   });
 
@@ -335,7 +368,49 @@ export function EventOrderbook({
       {history.isLoading && !data ? (
         <div className="panel-loading">Loading orderbook…</div>
       ) : tab === "graph" ? (
-        <OrderbookChart snapshots={data?.snapshots ?? []} matchEnd={matchEnd} />
+        <OrderbookChart
+          style={chartStyle}
+          onStyleChange={setChartStyle}
+          canDual={Boolean(chartPair)}
+          matchEnd={matchEnd}
+          series={
+            chartStyle === "dual" && chartPair
+              ? [
+                  {
+                    key: chartPair[0].tokenId,
+                    label:
+                      chartPair[0].marketType === "weather"
+                        ? "Yes"
+                        : shortLabel(chartPair[0].label),
+                    color: "#4d7cff",
+                    snapshots:
+                      chartPair[0].tokenId === resolvedId
+                        ? (data?.snapshots ?? [])
+                        : (pairHistory.data?.snapshots ?? []),
+                  },
+                  {
+                    key: chartPair[1].tokenId,
+                    label:
+                      chartPair[1].marketType === "weather"
+                        ? "No"
+                        : shortLabel(chartPair[1].label),
+                    color: "#e8a838",
+                    snapshots:
+                      chartPair[1].tokenId === resolvedId
+                        ? (data?.snapshots ?? [])
+                        : (pairHistory.data?.snapshots ?? []),
+                  },
+                ]
+              : [
+                  {
+                    key: resolvedId,
+                    label: scrubberLabel ? shortLabel(scrubberLabel) : "Price",
+                    color: "#4d7cff",
+                    snapshots: data?.snapshots ?? [],
+                  },
+                ]
+          }
+        />
       ) : (
         <OrderbookScrubber
           snapshots={data?.snapshots ?? []}
