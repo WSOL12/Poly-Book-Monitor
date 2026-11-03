@@ -1,10 +1,35 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { OrderbookChart, type ChartStyle } from "@/components/OrderbookChart";
 import { OrderbookScrubber } from "@/components/OrderbookScrubber";
 import type { FrameQuote } from "@/lib/history";
+
+const TAB_KEY = "ob-panel-tab";
+const STYLE_KEY = "ob-chart-style";
+
+function readStoredTab(): "book" | "graph" {
+  if (typeof window === "undefined") return "book";
+  try {
+    const v = sessionStorage.getItem(TAB_KEY);
+    if (v === "book" || v === "graph") return v;
+  } catch {
+    /* ignore */
+  }
+  return "book";
+}
+
+function readStoredStyle(): ChartStyle {
+  if (typeof window === "undefined") return "single";
+  try {
+    const v = sessionStorage.getItem(STYLE_KEY);
+    if (v === "single" || v === "dual") return v;
+  } catch {
+    /* ignore */
+  }
+  return "single";
+}
 
 export type { FrameQuote };
 
@@ -91,10 +116,26 @@ export function EventOrderbook({
   readySnapshots?: SnapshotRow[];
 }) {
   const [internalId, setInternalId] = useState(tokens[0]?.tokenId ?? "");
-  const [tab, setTab] = useState<"book" | "graph">("book");
-  const [chartStyle, setChartStyle] = useState<ChartStyle>("single");
+  const [tab, setTab] = useState<"book" | "graph">(readStoredTab);
+  const [chartStyle, setChartStyle] = useState<ChartStyle>(readStoredStyle);
   const activeId = tokenId ?? internalId;
   const setActiveId = onTokenChange ?? setInternalId;
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(TAB_KEY, tab);
+    } catch {
+      /* ignore */
+    }
+  }, [tab]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(STYLE_KEY, chartStyle);
+    } catch {
+      /* ignore */
+    }
+  }, [chartStyle]);
 
   const resolvedId = tokens.some((t) => t.tokenId === activeId)
     ? activeId

@@ -59,6 +59,31 @@ export type ChartMetric = "price" | "depth";
 /** Whole book, or size within N¢ of best bid / best ask. */
 export type DepthBand = "whole" | "3" | "5" | "10";
 
+const METRIC_KEY = "ob-chart-metric";
+const DEPTH_BAND_KEY = "ob-chart-depth-band";
+
+function readStoredMetric(): ChartMetric {
+  if (typeof window === "undefined") return "price";
+  try {
+    const v = sessionStorage.getItem(METRIC_KEY);
+    if (v === "depth" || v === "price") return v;
+  } catch {
+    /* ignore */
+  }
+  return "price";
+}
+
+function readStoredDepthBand(): DepthBand {
+  if (typeof window === "undefined") return "5";
+  try {
+    const v = sessionStorage.getItem(DEPTH_BAND_KEY);
+    if (v === "whole" || v === "3" || v === "5" || v === "10") return v;
+  } catch {
+    /* ignore */
+  }
+  return "5";
+}
+
 function depthFromSnap(snap: SnapshotRow, band: DepthBand): { bid: number; ask: number } {
   if (band === "3") return { bid: snap.bidNear3 ?? 0, ask: snap.askNear3 ?? 0 };
   if (band === "5") return { bid: snap.bidNear5 ?? 0, ask: snap.askNear5 ?? 0 };
@@ -294,8 +319,25 @@ export function OrderbookChart({
 }) {
   const primary = series[0];
   const secondary = series[1];
-  const [metric, setMetric] = useState<ChartMetric>("price");
-  const [depthBand, setDepthBand] = useState<DepthBand>("5");
+  const [metric, setMetric] = useState<ChartMetric>(readStoredMetric);
+  const [depthBand, setDepthBand] = useState<DepthBand>(readStoredDepthBand);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(METRIC_KEY, metric);
+    } catch {
+      /* ignore */
+    }
+  }, [metric]);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(DEPTH_BAND_KEY, depthBand);
+    } catch {
+      /* ignore */
+    }
+  }, [depthBand]);
+
   const dual = metric === "price" && style === "dual" && Boolean(secondary);
 
   const singleData = useMemo(() => {
@@ -512,17 +554,19 @@ export function OrderbookChart({
   const onBrushChange = useCallback(
     (range: { startIndex?: number; endIndex?: number } | null) => {
       if (!range || range.startIndex == null || range.endIndex == null || !indexData.length) {
-        setBrushIdx(null);
-        setDomain(null);
         return;
       }
-      const start = Math.min(range.startIndex, range.endIndex);
-      const end = Math.max(range.startIndex, range.endIndex);
-      setBrushIdx({ start, end });
+      if (!Number.isFinite(range.startIndex) || !Number.isFinite(range.endIndex)) return;
+      const last = indexData.length - 1;
+      const start = Math.min(last, Math.max(0, Math.round(Math.min(range.startIndex, range.endIndex))));
+      const end = Math.min(last, Math.max(start, Math.round(Math.max(range.startIndex, range.endIndex))));
+      if (end <= start) return;
       const a = indexData[start]?.at;
       const b = indexData[end]?.at;
-      if (a == null || b == null) return;
+      if (a == null || b == null || !Number.isFinite(a) || !Number.isFinite(b)) return;
+      setBrushIdx({ start, end });
       const next = clampDomain(Math.min(a, b), Math.max(a, b));
+      if (!Number.isFinite(next[0]) || !Number.isFinite(next[1])) return;
       if (next[0] <= fullLo + 1 && next[1] >= fullHi - 1) {
         setDomain(null);
         setBrushIdx(null);
@@ -575,8 +619,22 @@ export function OrderbookChart({
   }, [indexData, viewHi, brushStart]);
 
   const lastIdx = Math.max(0, indexData.length - 1);
-  const safeBrushStart = Math.min(Math.max(0, brushIdx?.start ?? brushStart), lastIdx);
-  const safeBrushEnd = Math.min(Math.max(safeBrushStart, brushIdx?.end ?? brushEnd), lastIdx);
+  const rawBrushStart = brushIdx?.start ?? brushStart;
+  const rawBrushEnd = brushIdx?.end ?? brushEnd;
+  const safeBrushStart = Number.isFinite(rawBrushStart)
+    ? Math.min(Math.max(0, Math.round(rawBrushStart)), lastIdx)
+    : 0;
+  const safeBrushEnd = Number.isFinite(rawBrushEnd)
+    ? Math.min(Math.max(safeBrushStart, Math.round(rawBrushEnd)), lastIdx)
+    : lastIdx;
+  const brushOk =
+    indexData.length >= 2 &&
+    fullSpan > 0 &&
+    Number.isFinite(viewLo) &&
+    Number.isFinite(viewHi) &&
+    Number.isFinite(safeBrushStart) &&
+    Number.isFinite(safeBrushEnd) &&
+    safeBrushEnd > safeBrushStart;
 
   // Keep toolbar visible while the second series loads — don't flash empty.
   const ready =
@@ -766,23 +824,26 @@ export function OrderbookChart({
             <XAxis
               dataKey="at"
               type="number"
-              domain={[viewLo, viewHi]}
+              domain={[
+                Number.isFinite(viewLo) ? viewLo : "dataMin",
+                Number.isFinite(viewHi) ? viewHi : "dataMax",
+              ]}
               allowDataOverflow
               tick={{ fill: "#8b939e", fontSize: 11 }}
               minTickGap={48}
-              tickFormatter={(v) => formatTick(Number(v))}
+              tickFormatter={(v) => (Number.isFinite(Number(v)) ? formatTick(Number(v)) : "")}
             />
             <YAxis
               tick={{ fill: "#8b939e", fontSize: 11 }}
-              domain={metric === "depth" ? [0, depthMax] : [0, 100]}
+              domain={metric === "depth" ? [0, Number.isFinite(depthMax) ? depthMax : 10] : [0, 100]}
               width={48}
               tickFormatter={(v) => (metric === "depth" ? formatShares(Number(v)) : `${v}¢`)}
             />
             <Tooltip
               contentStyle={{ background: "#101214", border: "1px solid #23282f", fontSize: 12 }}
-              labelFormatter={(v) => formatTick(Number(v))}
+              labelFormatter={(v) => (Number.isFinite(Number(v)) ? formatTick(Number(v)) : "")}
               formatter={(value, name) => {
-                if (value == null || value === "") return [null, ""];
+                if (value == null || value === "" || !Number.isFinite(Number(value))) return [null, ""];
                 if (metric === "depth") return [formatShares(Number(value)), String(name)];
                 return [`${value}¢`, String(name)];
               }}
@@ -856,17 +917,19 @@ export function OrderbookChart({
                 activeDot={{ r: 3, fill: colorB, stroke: "#fff", strokeWidth: 1 }}
               />
             ) : null}
-            <Brush
-              dataKey="at"
-              height={28}
-              stroke="#3d4450"
-              fill="#14171c"
-              travellerWidth={8}
-              startIndex={safeBrushStart}
-              endIndex={safeBrushEnd}
-              onChange={onBrushChange}
-              tickFormatter={(v) => formatTick(Number(v))}
-            />
+            {brushOk ? (
+              <Brush
+                dataKey="at"
+                height={28}
+                stroke="#3d4450"
+                fill="#14171c"
+                travellerWidth={8}
+                startIndex={safeBrushStart}
+                endIndex={safeBrushEnd}
+                onChange={onBrushChange}
+                tickFormatter={(v) => (Number.isFinite(Number(v)) ? formatTick(Number(v)) : "")}
+              />
+            ) : null}
           </ComposedChart>
         </ResponsiveContainer>
       </div>
