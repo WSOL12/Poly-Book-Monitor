@@ -11,6 +11,7 @@ const SPORTS = [
   { id: "mlb", label: "MLB", href: "/mlb" },
   { id: "tennis", label: "Tennis", href: "/tennis" },
   { id: "weather", label: "Weather", href: "/weather" },
+  { id: "predictfun", label: "Predict", href: "/predictfun" },
 ] as const;
 
 export function Topbar() {
@@ -34,6 +35,7 @@ export function Topbar() {
     : pathname.startsWith("/mlb") ? "mlb"
     : pathname.startsWith("/tennis") ? "tennis"
     : pathname.startsWith("/weather") ? "weather"
+    : pathname.startsWith("/predictfun") ? "predictfun"
     : "all";
 
   const stats = overview.data;

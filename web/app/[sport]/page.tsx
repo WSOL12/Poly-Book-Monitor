@@ -1,4 +1,5 @@
 import { Dashboard } from "@/components/Dashboard";
+import { redirect } from "next/navigation";
 
 export default async function SportPage({ params }: { params: Promise<{ sport: string }> }) {
   const { sport } = await params;
@@ -7,8 +8,10 @@ export default async function SportPage({ params }: { params: Promise<{ sport: s
     sport === "football" ||
     sport === "mlb" ||
     sport === "weather" ||
-    sport === "tennis"
+    sport === "tennis" ||
+    sport === "predictfun"
       ? sport
       : undefined;
+  if (!allowed && sport !== "all") redirect("/");
   return <Dashboard sport={allowed} />;
 }

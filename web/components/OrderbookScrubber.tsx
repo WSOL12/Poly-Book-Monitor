@@ -209,6 +209,7 @@ export function OrderbookScrubber({
   seekAt,
   onFrame,
   sport,
+  clockSport,
 }: {
   snapshots: SnapshotRow[];
   outcomeLabel?: string;
@@ -219,19 +220,26 @@ export function OrderbookScrubber({
   onFrame?: (payload: { clockAt: number; snap?: SnapshotRow; idx: number }) => void;
   /** Required for per-sport DB lookup of full book frames. */
   sport?: string;
+  /** Match-clock sport for scrub bounds (soccer when viewing Predict.fun twin). */
+  clockSport?: string;
 }) {
+  const scrubClockSport = clockSport ?? (sport === "predictfun" ? "soccer" : sport);
   const frames = useMemo(
-    () => cropScrubWindow(snapshots, matchStart, matchEnd),
-    [snapshots, matchStart, matchEnd]
+    () => cropScrubWindow(snapshots, matchStart, matchEnd, scrubClockSport),
+    [snapshots, matchStart, matchEnd, scrubClockSport]
   );
+  const framesKey =
+    frames.length > 0
+      ? `${sport ?? ""}:${frames[0]!.id}:${frames[frames.length - 1]!.id}:${frames.length}`
+      : `${sport ?? ""}:empty`;
 
   // Shared match clock — include frames so prematch (snaps before kickoff) windows correctly.
-  const window = useMemo(() => {
-    if (frames.length) return matchScrubWindow(matchStart, matchEnd, frames);
-    return matchScrubWindow(matchStart, matchEnd);
-  }, [matchStart, matchEnd, frames]);
-  const t0 = window?.t0 ?? frames[0]?.capturedAt ?? 0;
-  const t1 = window?.t1 ?? frames[frames.length - 1]?.capturedAt ?? 0;
+  const scrubWindow = useMemo(() => {
+    if (frames.length) return matchScrubWindow(matchStart, matchEnd, frames, scrubClockSport);
+    return matchScrubWindow(matchStart, matchEnd, undefined, scrubClockSport);
+  }, [matchStart, matchEnd, frames, scrubClockSport]);
+  const t0 = scrubWindow?.t0 ?? frames[0]?.capturedAt ?? 0;
+  const t1 = scrubWindow?.t1 ?? frames[frames.length - 1]?.capturedAt ?? 0;
   const spanMs = Math.max(0, t1 - t0);
 
   const [anchorAt, setAnchorAt] = useState<number | undefined>(seekAt);
@@ -245,12 +253,18 @@ export function OrderbookScrubber({
   const [scrubbing, setScrubbing] = useState(false);
   const fineLockRef = useRef<{ lo: number; hi: number } | null>(null);
   const initedRef = useRef(false);
+  const prevFramesKeyRef = useRef(framesKey);
+  if (prevFramesKeyRef.current !== framesKey) {
+    prevFramesKeyRef.current = framesKey;
+    initedRef.current = false;
+  }
   const askScrollRef = useRef<HTMLDivElement>(null);
   const bidScrollRef = useRef<HTMLDivElement>(null);
   const onFrameRef = useRef(onFrame);
   onFrameRef.current = onFrame;
   const scrubbingRef = useRef(false);
   const pendingLoadRef = useRef<number | null>(null);
+  const scrubFlushTimerRef = useRef<number | null>(null);
   const queryClient = useQueryClient();
 
   const clockAt = clamp(anchorAt ?? (startAtBeginning ? t0 : t1), t0, t1 || t0);
@@ -314,9 +328,18 @@ export function OrderbookScrubber({
       // Sidebar / all-market quotes follow the thumb immediately (rAF-throttled).
       scheduleClock(at, immediate);
       pendingLoadRef.current = at;
-      // Depth book fetch stays deferred while dragging — that was freezing the scrubber.
-      if (!immediate && scrubbingRef.current) return;
-      flushLoad(at);
+      // Depth book: flush immediately on release / step; while dragging, throttle
+      // so the ladder tracks the timeline without hammering /api/snapshots.
+      if (immediate || !scrubbingRef.current) {
+        flushLoad(at);
+        return;
+      }
+      if (scrubFlushTimerRef.current != null) return;
+      scrubFlushTimerRef.current = window.setTimeout(() => {
+        scrubFlushTimerRef.current = null;
+        const pending = pendingLoadRef.current;
+        if (pending != null) flushLoad(pending);
+      }, 120);
     },
     [flushLoad, scheduleClock]
   );
@@ -329,6 +352,10 @@ export function OrderbookScrubber({
   const endScrub = () => {
     scrubbingRef.current = false;
     setScrubbing(false);
+    if (scrubFlushTimerRef.current != null) {
+      window.clearTimeout(scrubFlushTimerRef.current);
+      scrubFlushTimerRef.current = null;
+    }
     scheduleFlush(pendingLoadRef.current ?? clockAtRef.current, true);
   };
 
@@ -365,7 +392,7 @@ export function OrderbookScrubber({
 
   // First load only — never reset bars when the token series changes.
   useEffect(() => {
-    if (!frames.length || !window || initedRef.current) return;
+    if (!frames.length || !scrubWindow || initedRef.current) return;
     initedRef.current = true;
     // Live recording: always ride the tip unless seekAt is an intentional scrub behind tip.
     if (!startAtBeginning) {
@@ -398,7 +425,7 @@ export function OrderbookScrubber({
     setLoadAt(at);
     setFineAnchorAt(at);
     setFollowLive(false);
-  }, [frames, window, t0, t1, seekAt, startAtBeginning]);
+  }, [frames, scrubWindow, t0, t1, seekAt, startAtBeginning]);
 
   useEffect(() => {
     if (!Number.isFinite(resolvedLoadAt) || !frames.length) return;
@@ -409,6 +436,7 @@ export function OrderbookScrubber({
   useEffect(() => {
     return () => {
       if (clockRafRef.current != null) cancelAnimationFrame(clockRafRef.current);
+      if (scrubFlushTimerRef.current != null) window.clearTimeout(scrubFlushTimerRef.current);
     };
   }, []);
 
@@ -474,20 +502,39 @@ export function OrderbookScrubber({
   }, [playing, clockAt, fineAnchorAt, fineHalfMs]);
 
   const askRows = useMemo(() => {
-    const asks = bookQuery.data?.asks?.length ? bookQuery.data.asks : displaySnap?.asks ?? [];
+    // Prefer the book that matches the loaded frame — not a stale keepPreviousData ladder.
+    const source =
+      ladderReady && bookQuery.data?.asks?.length
+        ? bookQuery.data
+        : displaySnap?.asks?.length
+          ? displaySnap
+          : bookQuery.data;
+    const asks = source?.asks ?? [];
     return withTotals([...asks].sort((a, b) => a.price - b.price), "ask");
-  }, [bookQuery.data, displaySnap]);
+  }, [bookQuery.data, displaySnap, ladderReady]);
   const bidRows = useMemo(() => {
-    const bids = bookQuery.data?.bids?.length ? bookQuery.data.bids : displaySnap?.bids ?? [];
+    const source =
+      ladderReady && bookQuery.data?.bids?.length
+        ? bookQuery.data
+        : displaySnap?.bids?.length
+          ? displaySnap
+          : bookQuery.data;
+    const bids = source?.bids ?? [];
     return withTotals([...bids].sort((a, b) => b.price - a.price), "bid");
-  }, [bookQuery.data, displaySnap]);
+  }, [bookQuery.data, displaySnap, ladderReady]);
   const maxSize = useMemo(() => {
+    const source =
+      ladderReady && bookQuery.data
+        ? bookQuery.data
+        : displaySnap?.asks?.length || displaySnap?.bids?.length
+          ? displaySnap
+          : bookQuery.data;
     let m = 0;
-    for (const l of [...(bookQuery.data?.asks ?? displaySnap?.asks ?? []), ...(bookQuery.data?.bids ?? displaySnap?.bids ?? [])]) {
+    for (const l of [...(source?.asks ?? []), ...(source?.bids ?? [])]) {
       m = Math.max(m, l.size);
     }
     return m;
-  }, [bookQuery.data, displaySnap]);
+  }, [bookQuery.data, displaySnap, ladderReady]);
 
   useEffect(() => {
     const askRoot = askScrollRef.current;
@@ -497,7 +544,7 @@ export function OrderbookScrubber({
     bidRoot.scrollTop = 0;
   }, [displaySnap?.id, askRows.length, bidRows.length]);
 
-  if (!frames.length || !snap || !displaySnap || !window) {
+  if (!frames.length || !snap || !displaySnap || !scrubWindow) {
     return (
       <div className="empty">
         No orderbook snapshots recorded for this market.

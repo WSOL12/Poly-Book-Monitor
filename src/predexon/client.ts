@@ -86,6 +86,22 @@ export async function predexonGet(
     return JSON.parse(retry.text) as unknown;
   }
   if (response.status !== 200) {
+    // Skip dead keys and retry once with the next key in the pool.
+    if (
+      response.status === 403 &&
+      /inactive_api_key|invalid api key/i.test(response.text) &&
+      opts.apiKeys.length > 1
+    ) {
+      const { key: key2, keyIndex: keyIndex2 } = nextApiKey(opts);
+      if (key2 !== key) {
+        const lane2 = `k${keyIndex2}:${laneName}`;
+        await acquireRequestSlot(lane2, opts.requestDelayMs);
+        const retryKey = await httpGet(url, { "x-api-key": key2 });
+        if (retryKey.status === 200) {
+          return JSON.parse(retryKey.text) as unknown;
+        }
+      }
+    }
     throw new Error(`Predexon HTTP ${response.status}: ${response.text.slice(0, 300)}`);
   }
   return JSON.parse(response.text) as unknown;

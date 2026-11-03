@@ -65,11 +65,11 @@ function parseSports(raw: string): MonitorSport[] {
         .filter(Boolean)
         .map((p) => (p === "nfl" ? "football" : p)),
     ),
-  ];
+  ].filter((p) => p !== "predictfun");
   if (parts.length === 0) throw new Error("Pass at least one sport");
   for (const p of parts) {
     if (!(SPORTS as readonly string[]).includes(p)) {
-      throw new Error(`Unknown sport "${p}". Use: ${SPORTS.join(", ")}`);
+      throw new Error(`Unknown sport "${p}". Use: ${SPORTS.filter((s) => s !== "predictfun").join(", ")}`);
     }
   }
   return parts as MonitorSport[];
@@ -77,7 +77,10 @@ function parseSports(raw: string): MonitorSport[] {
 
 function parseOptions(argv: string[]): Options {
   const apiKeys = parseApiKeysFromEnv();
-  const sports = parseSports(readArg(argv, "--sports") ?? envValue("DOWNLOAD_SPORTS", SPORTS.join(",")));
+  const sports = parseSports(
+    readArg(argv, "--sports") ??
+      envValue("DOWNLOAD_SPORTS", SPORTS.filter((s) => s !== "predictfun").join(",")),
+  );
   const statusRaw = (readArg(argv, "--status") ?? envValue("DOWNLOAD_STATUS", "both")).toLowerCase();
   if (statusRaw !== "open" && statusRaw !== "closed" && statusRaw !== "both") {
     throw new Error(`Bad --status / DOWNLOAD_STATUS: ${statusRaw}`);
@@ -153,19 +156,33 @@ function eventTimeRangeMs(event: MonitoredEvent, fallbackFrom: number, fallbackT
   startMs: number;
   endMs: number;
 } {
+  const floor = Date.parse("2026-01-01T00:00:00Z");
   const startCandidates = [event.startTime, event.eventDate]
     .map((v) => (v ? Date.parse(v.length === 10 ? `${v}T00:00:00Z` : v) : NaN))
     .filter((n) => Number.isFinite(n));
-  const endCandidates = [event.finishedAt ?? NaN]
-    .concat(event.startTime ? Date.parse(event.startTime) + 6 * 3600_000 : NaN)
-    .filter((n) => Number.isFinite(n));
 
-  let startMs = startCandidates.length ? Math.min(...startCandidates) : fallbackFrom;
-  let endMs = endCandidates.length ? Math.max(...endCandidates) : fallbackTo;
-  const floor = Date.parse("2026-01-01T00:00:00Z");
+  // Prematch books often exist 1–2 days before scheduled start (tennis listings).
+  let startMs = startCandidates.length ? Math.min(...startCandidates) - 36 * 3600_000 : fallbackFrom;
   startMs = Math.max(startMs, floor, fallbackFrom);
-  endMs = Math.min(Math.max(endMs, startMs + 60_000), fallbackTo);
-  if (!event.ended && !event.closed) endMs = Math.min(Date.now(), fallbackTo);
+
+  const now = Date.now();
+  let endMs: number;
+  if (event.ended || event.closed) {
+    const endCandidates = [event.finishedAt ?? NaN]
+      .concat(event.startTime ? Date.parse(event.startTime) + 8 * 3600_000 : NaN)
+      .filter((n) => Number.isFinite(n));
+    endMs = endCandidates.length ? Math.max(...endCandidates) : fallbackTo;
+    endMs = Math.min(Math.max(endMs, startMs + 60_000), Math.max(fallbackTo, now));
+  } else {
+    // Open / not-started: always pull through "now" so future kickoffs still get prematch books.
+    endMs = Math.max(now, fallbackTo);
+  }
+
+  // Never invert — that permanently wrote 0 snaps when start was after the download `to`.
+  if (endMs <= startMs) {
+    endMs = Math.max(now, startMs + 60_000);
+    startMs = Math.max(floor, fallbackFrom, endMs - 3 * 86_400_000);
+  }
   return { startMs, endMs };
 }
 
@@ -244,10 +261,10 @@ async function downloadEvent(
       }
     }
 
-    // Closed/ended events freeze as complete=1 (skip on next run).
+    // Closed/ended events freeze as complete=1 (skip on next run) only if we got books.
     // Open events stay incomplete so a later run can append new books.
     const settled = event.ended || event.closed;
-    if (settled) {
+    if (settled && totalSnaps > 0) {
       hub.markDownloadComplete(event.eventId, {
         tokens: tokens.length,
         snapshots: totalSnaps,
@@ -260,7 +277,9 @@ async function downloadEvent(
         tokens: tokens.length,
         fromMs: range.startMs,
         toMs: range.endMs,
-        note: `open; snaps=${totalSnaps}`,
+        note: settled
+          ? `closed but snaps=${totalSnaps}`
+          : `open; snaps=${totalSnaps}`,
       });
     }
 

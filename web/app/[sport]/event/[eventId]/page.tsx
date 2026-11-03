@@ -1,7 +1,7 @@
 import EventDetail from "@/components/EventDetail";
 import { redirect } from "next/navigation";
 
-const SPORTS = new Set(["soccer", "football", "mlb", "weather", "tennis"]);
+const SPORTS = new Set(["soccer", "football", "mlb", "weather", "tennis", "predictfun"]);
 
 export default async function SportEventRoute({
   params,
@@ -10,6 +10,5 @@ export default async function SportEventRoute({
 }) {
   const { sport, eventId } = await params;
   if (!SPORTS.has(sport)) redirect(`/event/${eventId}`);
-  // No key={eventId} — EventDetail resets via useEffect; shell/MatchRail stay mounted.
   return <EventDetail eventId={eventId} />;
 }

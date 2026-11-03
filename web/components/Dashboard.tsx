@@ -23,7 +23,8 @@ export function Dashboard({ sport }: { sport?: "soccer" | "football" | "mlb" | "
       const body = (await res.json()) as { events: EventRow[] };
       return body.events;
     },
-    refetchInterval: 5_000,
+    refetchInterval: 15_000,
+    staleTime: 12_000,
   });
 
   const stats = overview.data;
@@ -41,11 +42,25 @@ export function Dashboard({ sport }: { sport?: "soccer" | "football" | "mlb" | "
             {stats ? (
               <>
                 {" · "}
-                <span className="mono">{stats.events}</span> events
-                {" · "}
-                <span className="mono">{stats.tokens}</span> tokens
-                {" · "}
-                <span className="mono">{stats.snapshots?.toLocaleString?.()}</span> snapshots
+                {(() => {
+                  const row = sport
+                    ? (stats.bySport as Array<{ sport: string; events: number; tokens: number; snapshots: number }> | undefined)?.find(
+                        (s) => s.sport === sport
+                      )
+                    : null;
+                  const events = row?.events ?? stats.events;
+                  const tokens = row?.tokens ?? stats.tokens;
+                  const snaps = row?.snapshots ?? stats.snapshots;
+                  return (
+                    <>
+                      <span className="mono">{events}</span> events
+                      {" · "}
+                      <span className="mono">{tokens}</span> tokens
+                      {" · "}
+                      <span className="mono">{Number(snaps).toLocaleString()}</span> snapshots
+                    </>
+                  );
+                })()}
               </>
             ) : null}
           </p>

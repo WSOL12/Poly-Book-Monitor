@@ -1,7 +1,13 @@
 import type { EventRow } from "@/lib/db";
 import { resolveLeague, type LeagueGroup } from "@/lib/league";
 
-export type MatchSort = "volume_desc" | "volume_asc" | "date_desc" | "date_asc" | "title";
+export type MatchSort =
+  | "volume_desc"
+  | "volume_asc"
+  | "date_desc"
+  | "date_asc"
+  | "title"
+  | "twin_first";
 export type VolumeFloor = 0 | 10_000 | 50_000 | 100_000 | 500_000;
 export type DateFilter = "all" | "today" | "3d" | "7d";
 
@@ -20,6 +26,7 @@ export const DEFAULT_MATCH_FILTERS: MatchListFilters = {
 };
 
 export const SORT_OPTIONS: Array<{ value: MatchSort; label: string }> = [
+  { value: "twin_first", label: "PF twins" },
   { value: "volume_desc", label: "Vol ↓" },
   { value: "volume_asc", label: "Vol ↑" },
   { value: "date_desc", label: "Date ↓" },
@@ -82,6 +89,12 @@ function passesDate(event: EventRow, date: DateFilter) {
 }
 
 function compareEvents(a: EventRow, b: EventRow, sort: MatchSort) {
+  if (sort === "twin_first") {
+    const ta = a.hasTwin ? 1 : 0;
+    const tb = b.hasTwin ? 1 : 0;
+    if (tb !== ta) return tb - ta;
+    return (b.volume ?? 0) - (a.volume ?? 0) || a.title.localeCompare(b.title);
+  }
   if (sort === "volume_desc") return (b.volume ?? 0) - (a.volume ?? 0);
   if (sort === "volume_asc") return (a.volume ?? 0) - (b.volume ?? 0);
   if (sort === "title") return a.title.localeCompare(b.title);
@@ -117,6 +130,23 @@ export function filterAndSortEvents(events: EventRow[], filters: MatchListFilter
 
 /** Group already-sorted events; keep within-group order; order groups by sort. */
 export function groupSortedEvents(events: EventRow[], sort: MatchSort): LeagueGroup<EventRow>[] {
+  // PF twins sort: pin matched games in a leading group so they sit at the top.
+  if (sort === "twin_first") {
+    const twins = events.filter((e) => e.hasTwin);
+    const rest = events.filter((e) => !e.hasTwin);
+    const groups: LeagueGroup<EventRow>[] = [];
+    if (twins.length) {
+      groups.push({
+        code: "__pf_twins__",
+        label: "PF twins",
+        totalVolume: twins.reduce((s, e) => s + (e.volume ?? 0), 0),
+        events: twins,
+      });
+    }
+    groups.push(...groupSortedEvents(rest, "volume_desc"));
+    return groups;
+  }
+
   const map = new Map<string, LeagueGroup<EventRow>>();
   for (const event of events) {
     const { code, label } = resolveLeague(event);

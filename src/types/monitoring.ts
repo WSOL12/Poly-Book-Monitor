@@ -1,4 +1,4 @@
-export type MonitorSport = "soccer" | "football" | "mlb" | "weather" | "tennis";
+export type MonitorSport = "soccer" | "football" | "mlb" | "weather" | "tennis" | "predictfun";
 
 export type MarketType =
   | "moneyline"
@@ -7,7 +7,12 @@ export type MarketType =
   | "set_winner"
   | "set_handicap"
   | "game_handicap"
-  | "completed_match";
+  | "completed_match"
+  | "exact_score"
+  | "corners"
+  | "btts"
+  | "half_result"
+  | "first_goal";
 
 export type MonitoredToken = {
   tokenId: string;

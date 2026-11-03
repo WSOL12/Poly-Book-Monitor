@@ -1,8 +1,8 @@
 # Poly Monitor
 
-Downloads **recorded** Polymarket orderbook history from [Predexon](https://docs.predexon.com/) into local SQLite. No live WebSocket monitoring.
+Downloads **recorded** Polymarket orderbook history from [Predexon](https://docs.predexon.com/) into local SQLite. Also downloads **Predict.Fun** sports books (YES-side) for side-by-side review.
 
-Covers soccer, football (NFL), MLB, tennis (ATP/WTA; ITF skipped), and highest-temperature weather markets. The Next.js dashboard reads the same day DBs as before.
+Covers soccer, football (NFL), MLB, tennis (ATP/WTA; ITF skipped), weather, and Predict.Fun sports markets. The Next.js dashboard reads the same day DBs as before.
 
 ## Quick start
 
@@ -20,11 +20,13 @@ cp .env.example .env
 npm install
 npm run download
 # optional: npm run download -- --sports soccer --days 2 --status closed
+npm run download:predictfun
+# optional: npm run download:predictfun -- --days 7 --limit 50 --force
 
 cd web && npm install && npm run dev
 ```
 
-Dashboard: http://127.0.0.1:9000 (or the port Next prints).
+Dashboard: http://127.0.0.1:9000 (or the port Next prints). Use the **Predict.fun** nav tab for PF sports markets.
 
 ## How it works
 
@@ -32,6 +34,7 @@ Dashboard: http://127.0.0.1:9000 (or the port Next prints).
 |------|--------|
 | Discover match events | **Polymarket Gamma** (`/events` by sport tag) |
 | Orderbook snapshots | **Predexon** [`/v2/polymarket/orderbooks`](https://docs.predexon.com/api-reference/markets/orderbooks) by `token_id` |
+| Predict.Fun sports + books | **Predexon** [`/v2/predictfun/markets`](https://docs.predexon.com/api-reference/predictfun/markets) + [`/v2/predictfun/orderbooks`](https://docs.predexon.com/api-reference/predictfun/orderbooks) (YES-side only) |
 
 Predexon sport tags alone are full of futures/outrights (not live matches). Gamma is the match catalog; Predexon is the recorded book history (from 2026-01-01).
 

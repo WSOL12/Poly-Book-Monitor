@@ -5,6 +5,14 @@ export type HistoryTimeline = {
   at: number[];
   bestBid: Array<number | null>;
   bestAsk: Array<number | null>;
+  bidDepth?: number[];
+  askDepth?: number[];
+  bidNear3?: number[];
+  askNear3?: number[];
+  bidNear5?: number[];
+  askNear5?: number[];
+  bidNear10?: number[];
+  askNear10?: number[];
   /** Per-row shard (YYYY-MM), required for monthly DB lookup. */
   day?: string[];
 };
@@ -18,8 +26,14 @@ export function expandTimeline(timeline: HistoryTimeline | undefined | null): Sn
       capturedAt: timeline.at[i]!,
       bestBid: timeline.bestBid[i] ?? null,
       bestAsk: timeline.bestAsk[i] ?? null,
-      bidDepth: 0,
-      askDepth: 0,
+      bidDepth: timeline.bidDepth?.[i] ?? 0,
+      askDepth: timeline.askDepth?.[i] ?? 0,
+      bidNear3: timeline.bidNear3?.[i] ?? 0,
+      askNear3: timeline.askNear3?.[i] ?? 0,
+      bidNear5: timeline.bidNear5?.[i] ?? 0,
+      askNear5: timeline.askNear5?.[i] ?? 0,
+      bidNear10: timeline.bidNear10?.[i] ?? 0,
+      askNear10: timeline.askNear10?.[i] ?? 0,
       bids: [],
       asks: [],
       day: timeline.day?.[i],
@@ -55,16 +69,17 @@ function upperBoundAt(snapshots: SnapshotRow[], targetAt: number) {
 
 /**
  * Clip scrubber frames to the match window so hours of post-settle flatline
- * don't stretch the timeline to ~17h after a 2h game.
+ * (and days of PF prematch from market-create) don't stretch the timeline.
  */
 export function cropScrubWindow(
   snapshots: SnapshotRow[],
   matchStart?: string | null,
-  matchEnd?: number | null
+  matchEnd?: number | null,
+  sport?: string | null
 ): SnapshotRow[] {
   if (snapshots.length < 2) return snapshots;
 
-  const window = matchScrubWindow(matchStart, matchEnd, snapshots);
+  const window = matchScrubWindow(matchStart, matchEnd, snapshots, sport);
   if (!window) return snapshots;
 
   const lo = lowerBoundAt(snapshots, window.t0);
@@ -72,6 +87,15 @@ export function cropScrubWindow(
   if (hi <= lo) return snapshots;
   const cropped = snapshots.slice(lo, hi + 1);
   return cropped.length >= 2 ? cropped : snapshots;
+}
+
+/** How far before kickoff the scrub bar may extend (PF markets list days early). */
+function prematchPadMs(sport?: string | null): number {
+  if (sport === "tennis") return 6 * 60 * 60_000;
+  if (sport === "football" || sport === "mlb") return 4 * 60 * 60_000;
+  if (sport === "weather") return 36 * 60 * 60_000;
+  // Soccer / default — keep twin compare tight around the match
+  return 3 * 60 * 60_000;
 }
 
 /**
@@ -82,12 +106,14 @@ export function cropScrubWindow(
 export function matchScrubWindow(
   matchStart?: string | null,
   matchEnd?: number | null,
-  sample?: SnapshotRow[]
+  sample?: SnapshotRow[],
+  sport?: string | null
 ): { t0: number; t1: number } | null {
   const kickoff = matchStart ? Date.parse(matchStart) : NaN;
   const finish = matchEnd != null && Number.isFinite(matchEnd) ? Number(matchEnd) : NaN;
   const sampleLo = sample?.[0]?.capturedAt;
   const sampleHi = sample && sample.length ? sample[sample.length - 1]!.capturedAt : undefined;
+  const pad = prematchPadMs(sport);
 
   // Open/prematch books land entirely before scheduled start — don't invent a kickoff window.
   if (
@@ -97,7 +123,9 @@ export function matchScrubWindow(
     sampleHi > sampleLo &&
     sampleHi < kickoff
   ) {
-    return { t0: sampleLo, t1: sampleHi };
+    // Still cap so PF market-create (days early) doesn't become a week-long scrub.
+    const t0 = Math.max(sampleLo, kickoff - pad);
+    return { t0, t1: sampleHi };
   }
 
   if (Number.isFinite(kickoff) && Number.isFinite(finish) && finish > kickoff) {
@@ -110,24 +138,35 @@ export function matchScrubWindow(
     ) {
       return { t0: sampleLo, t1: sampleHi };
     }
-    // Late join: scrub the real recorded span (still in-play), not a fake pre-kickoff pad.
-    if (sampleLo != null && sampleHi != null && sampleLo > kickoff + 5 * 60_000) {
-      return { t0: sampleLo, t1: Math.max(sampleHi, finish) };
+    const { maxMs } = sportMatchBounds(sport);
+    const hardEnd = Math.min(Math.max(finish, kickoff + 60_000), kickoff + maxMs);
+    // First snap at/after kickoff (ignore days of PF market-create prematch).
+    const firstInPlay =
+      sample?.find((s) => s.capturedAt >= kickoff - 5 * 60_000)?.capturedAt ?? sampleLo;
+    // Late join / gap after KO: scrub from first real book, not an empty pad.
+    if (firstInPlay != null && sampleHi != null && firstInPlay > kickoff + 5 * 60_000) {
+      const t1 = Math.min(Math.max(sampleHi, finish), hardEnd + 15 * 60_000);
+      return { t0: firstInPlay, t1 };
     }
-    const t1 = sampleHi != null ? Math.max(sampleHi, finish) : finish + 5 * 60_000;
+    const rawHi = sampleHi != null ? Math.max(sampleHi, finish) : finish + 5 * 60_000;
+    const t1 = Math.min(rawHi, hardEnd + 15 * 60_000);
+    const earliest = kickoff - pad;
     const t0 =
       sampleLo != null && sampleLo < kickoff - 5 * 60_000
-        ? sampleLo
+        ? Math.max(sampleLo, earliest)
         : kickoff - 5 * 60_000;
     return { t0, t1: Math.max(t1, kickoff + 60_000) };
   }
 
   if (Number.isFinite(kickoff) && sampleHi != null && sampleHi > kickoff) {
+    const earliest = kickoff - pad;
     const t0 =
       sampleLo != null && sampleLo < kickoff - 5 * 60_000
-        ? sampleLo
+        ? Math.max(sampleLo, earliest)
         : kickoff - 5 * 60_000;
-    return { t0, t1: sampleHi };
+    const { maxMs } = sportMatchBounds(sport);
+    const t1 = Math.min(sampleHi, kickoff + maxMs + 15 * 60_000);
+    return { t0, t1 };
   }
 
   if (sampleLo != null && sampleHi != null && sampleHi > sampleLo) {

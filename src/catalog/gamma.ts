@@ -354,6 +354,7 @@ export const SPORT_TAGS: Record<MonitorSport, string[]> = {
   mlb: ["mlb"],
   weather: ["highest-temperature"],
   tennis: ["tennis"],
+  predictfun: [],
 };
 
 function eventTimeMs(event: GammaEvent): number | null {
@@ -373,7 +374,9 @@ function eventTimeMs(event: GammaEvent): number | null {
 export function eventInTimeWindow(event: GammaEvent, fromMs: number, toMs: number): boolean {
   const t = eventTimeMs(event);
   if (t == null) return true;
-  return t >= fromMs && t <= toMs;
+  // Include upcoming fixtures a bit past `to` so "open" downloads catch tonight's card.
+  const padMs = 36 * 60 * 60 * 1000;
+  return t >= fromMs - padMs && t <= toMs + padMs;
 }
 
 async function fetchTagPages(

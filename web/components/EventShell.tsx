@@ -6,7 +6,7 @@ import { MatchRail } from "@/components/MatchRail";
 import { Topbar } from "@/components/Topbar";
 import type { Sport } from "@/lib/db";
 
-const SPORTS = new Set<Sport>(["soccer", "football", "mlb", "weather", "tennis"]);
+const SPORTS = new Set<Sport>(["soccer", "football", "mlb", "weather", "tennis", "predictfun"]);
 
 export function EventShell({ children }: { children: ReactNode }) {
   const params = useParams<{ sport?: string; eventId?: string }>();

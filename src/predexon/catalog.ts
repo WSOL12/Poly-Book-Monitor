@@ -20,6 +20,7 @@ export const SPORT_TAGS: Record<MonitorSport, string[]> = {
   mlb: ["mlb"],
   weather: ["highest-temperature"],
   tennis: ["tennis"],
+  predictfun: [],
 };
 
 export type ListEventsOpts = {

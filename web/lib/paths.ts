@@ -1,13 +1,19 @@
 import { existsSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
-export type Sport = "soccer" | "football" | "mlb" | "weather" | "tennis";
+export type Sport = "soccer" | "football" | "mlb" | "weather" | "tennis" | "predictfun";
 
-export const SPORTS: Sport[] = ["soccer", "football", "mlb", "weather", "tennis"];
+export const SPORTS: Sport[] = ["soccer", "football", "mlb", "weather", "tennis", "predictfun"];
 
-export const PROJECT_ROOT = process.env.MONITOR_ROOT
-  ? resolve(process.env.MONITOR_ROOT)
-  : resolve(process.cwd(), "..");
+function resolveProjectRoot(): string {
+  if (process.env.MONITOR_ROOT) return resolve(process.env.MONITOR_ROOT);
+  // Prefer cwd when it already contains ./data (repo root). Otherwise assume cwd is web/.
+  if (existsSync(resolve(process.cwd(), "data"))) return resolve(process.cwd());
+  if (existsSync(resolve(process.cwd(), "..", "data"))) return resolve(process.cwd(), "..");
+  return resolve(process.cwd());
+}
+
+export const PROJECT_ROOT = resolveProjectRoot();
 
 export const DATA_DIR = process.env.DATA_DIR ?? resolve(PROJECT_ROOT, "data");
 

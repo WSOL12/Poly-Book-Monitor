@@ -24,6 +24,7 @@ const SPORT_LABEL: Record<string, string> = {
   mlb: "MLB",
   weather: "Weather",
   tennis: "Tennis",
+  predictfun: "Predict.fun",
 };
 
 function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
@@ -35,10 +36,17 @@ function MatchRow({ event, tab }: { event: EventRow; tab: Tab }) {
   return (
     <Link
       href={`/${event.sport}/event/${event.eventId}`}
-      className={`match-row${statusOn ? " match-row-live" : ""}`}
+      className={`match-row${statusOn ? " match-row-live" : ""}${event.hasTwin ? " match-row-twin" : ""}`}
     >
       <div className="match-main">
-        <div className="match-title">{event.title}</div>
+        <div className="match-title-row">
+          <div className="match-title">{event.title}</div>
+          {event.hasTwin ? (
+            <span className="twin-badge" title="Matched on Predict.fun">
+              PF
+            </span>
+          ) : null}
+        </div>
         <div className="match-meta">
           <span className={`sport-chip sport-${event.sport}`}>{SPORT_LABEL[event.sport] ?? event.sport}</span>
           <span className="match-league" style={{ color: accent }}>

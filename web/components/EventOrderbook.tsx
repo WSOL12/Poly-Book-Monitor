@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { OrderbookChart, type ChartStyle } from "@/components/OrderbookChart";
 import { OrderbookScrubber } from "@/components/OrderbookScrubber";
 import type { FrameQuote } from "@/lib/history";
@@ -43,9 +43,11 @@ function bucketKey(token: TokenOption) {
 
 import { cropScrubWindow, expandTimeline } from "@/lib/timeline";
 import { formatVolume } from "@/lib/league";
+import type { SnapshotRow } from "@/lib/db";
 
-async function fetchHistory(tokenId: string) {
-  const res = await fetch(`/api/tokens/${tokenId}/history`);
+async function fetchHistory(tokenId: string, sport?: string) {
+  const q = sport ? `?sport=${encodeURIComponent(sport)}` : "";
+  const res = await fetch(`/api/tokens/${encodeURIComponent(tokenId)}/history${q}`);
   if (!res.ok) throw new Error("history unavailable");
   const raw = await res.json();
   return {
@@ -66,6 +68,8 @@ export function EventOrderbook({
   seekAt,
   eventVolume,
   sport,
+  clockSport,
+  readySnapshots,
 }: {
   tokens: TokenOption[];
   eventFinished?: boolean;
@@ -79,7 +83,12 @@ export function EventOrderbook({
   seekAt?: number;
   /** Event-level Polymarket volume fallback when market volume is missing. */
   eventVolume?: number | null;
+  /** Venue sport for DB snapshot lookup (predictfun when viewing twin). */
   sport?: string;
+  /** Match-clock sport for scrub window (soccer/tennis…) — never the twin venue id. */
+  clockSport?: string;
+  /** From event quote series — paint scrubber immediately without /history. */
+  readySnapshots?: SnapshotRow[];
 }) {
   const [internalId, setInternalId] = useState(tokens[0]?.tokenId ?? "");
   const [tab, setTab] = useState<"book" | "graph">("book");
@@ -109,11 +118,33 @@ export function EventOrderbook({
     return [...byKey.values()];
   }, [weatherBuckets]);
 
-  const outcomeTokens = moneyline.length
-    ? moneyline
-    : weatherBucketPills.length
-      ? weatherBucketPills
-      : tokens.slice(0, 3);
+  const outcomeTokens = useMemo(() => {
+    if (weatherBucketPills.length) return weatherBucketPills;
+    if (!moneyline.length) return tokens.slice(0, 3);
+    if (sport === "predictfun") {
+      const yesOnly = moneyline.filter((t) => t.side === "yes" || t.side === "home" || t.side === "over");
+      const noTok = moneyline.filter((t) => t.side === "no" || t.side === "away" || t.side === "under");
+      // Binary match (tennis): one Yes + one No with player names — show both.
+      const binaryMatch =
+        yesOnly.length === 1 &&
+        noTok.length === 1 &&
+        !/^(yes|no)$/i.test(yesOnly[0]!.label.trim());
+      if (binaryMatch) {
+        return [yesOnly[0]!, noTok[0]!];
+      }
+      // Soccer-style: separate Yes markets per team (BRE / Draw / CHE).
+      const pool = yesOnly.length ? yesOnly : moneyline;
+      const draws = pool.filter((t) => /\bdraw\b/i.test(t.label));
+      const others = pool
+        .filter((t) => !/\bdraw\b/i.test(t.label))
+        .sort((a, b) => a.label.localeCompare(b.label));
+      if (others.length >= 2 && draws.length) {
+        return [others[0]!, ...draws, ...others.slice(1)];
+      }
+      return [...others, ...draws];
+    }
+    return moneyline;
+  }, [moneyline, weatherBucketPills, tokens, sport]);
 
   const activeSide = active?.side === "no" ? "no" : "yes";
   const weatherPair = useMemo(() => {
@@ -149,9 +180,10 @@ export function EventOrderbook({
         : chartPair?.[1]?.tokenId ?? "";
 
   const history = useQuery({
-    queryKey: ["token-history", resolvedId],
-    queryFn: () => fetchHistory(resolvedId),
-    enabled: Boolean(resolvedId),
+    queryKey: ["token-history", resolvedId, sport ?? ""],
+    queryFn: () => fetchHistory(resolvedId, sport),
+    // Graph (esp. depth) needs L2-derived sizes — quote prefetch is TOB-only.
+    enabled: Boolean(resolvedId) && (tab === "graph" || !(readySnapshots && readySnapshots.length > 0)),
     // Keep polling briefly after finish — monitor still writes settlement books for ~10m.
     refetchInterval: () => {
       if (!eventFinished) return 5_000;
@@ -159,16 +191,14 @@ export function EventOrderbook({
       return false;
     },
     staleTime: eventFinished && !(matchEnd != null && Date.now() - matchEnd < 12 * 60_000) ? Infinity : 4_000,
-    // Keep the scrubber mounted while another market's history loads.
-    placeholderData: keepPreviousData,
+    // Do NOT keepPreviousData across tokens — Poly↔Predict switch would paint the wrong venue's books.
   });
 
   const pairHistory = useQuery({
-    queryKey: ["token-history", pairOtherId],
-    queryFn: () => fetchHistory(pairOtherId),
+    queryKey: ["token-history", pairOtherId, sport ?? ""],
+    queryFn: () => fetchHistory(pairOtherId, sport),
     enabled: Boolean(pairOtherId) && tab === "graph",
     staleTime: eventFinished && !(matchEnd != null && Date.now() - matchEnd < 12 * 60_000) ? Infinity : 4_000,
-    placeholderData: keepPreviousData,
   });
 
   const handleFrame = useCallback(
@@ -196,13 +226,20 @@ export function EventOrderbook({
   }
 
   const data = history.data;
+  const scrubClockSport = clockSport ?? (sport === "predictfun" ? "soccer" : sport);
+  const sourceSnapshots =
+    tab === "graph" && data?.snapshots?.length
+      ? data.snapshots
+      : readySnapshots && readySnapshots.length > 0
+        ? readySnapshots
+        : (data?.snapshots ?? []);
   const scrubFrames = useMemo(
-    () => cropScrubWindow(data?.snapshots ?? [], matchStart, matchEnd),
-    [data?.snapshots, matchStart, matchEnd]
+    () => cropScrubWindow(sourceSnapshots, matchStart, matchEnd, scrubClockSport),
+    [sourceSnapshots, matchStart, matchEnd, scrubClockSport]
   );
-  const frames = scrubFrames.length || data?.totalSnapshots || 0;
+  const frames = scrubFrames.length || data?.totalSnapshots || sourceSnapshots.length || 0;
   const settlementOnly = useMemo(() => {
-    const snaps = data?.snapshots ?? [];
+    const snaps = scrubFrames.length ? scrubFrames : sourceSnapshots;
     if (snaps.length < 2) return snaps.length > 0;
     const first = snaps[0]!;
     const last = snaps[snaps.length - 1]!;
@@ -221,16 +258,21 @@ export function EventOrderbook({
         nearSettled(s.bestAsk) || nearSettled(s.bestBid)
     );
     return allSettled && seen.size <= 3 && last.capturedAt - first.capturedAt < 20 * 60_000;
-  }, [data?.snapshots, matchEnd]);
+  }, [scrubFrames, sourceSnapshots, matchEnd]);
 
   const missedKickoffMin = useMemo(() => {
-    const snaps = data?.snapshots ?? [];
+    const snaps = scrubFrames.length ? scrubFrames : sourceSnapshots;
     if (!snaps.length || !matchStart) return 0;
     const kickoff = Date.parse(matchStart);
     if (!Number.isFinite(kickoff)) return 0;
-    const lag = snaps[0]!.capturedAt - kickoff;
-    return lag > 5 * 60_000 ? Math.round(lag / 60_000) : 0;
-  }, [data?.snapshots, matchStart]);
+    // First snap at/after kickoff (ignore days of PF prematch sitting before KO).
+    const firstInPlay =
+      snaps.find((s: SnapshotRow) => s.capturedAt >= kickoff - 60_000) ?? snaps[0]!;
+    const lag = firstInPlay.capturedAt - kickoff;
+    if (lag <= 5 * 60_000) return 0;
+    if (lag > 6 * 60 * 60_000) return 0;
+    return Math.round(lag / 60_000);
+  }, [scrubFrames, sourceSnapshots, matchStart]);
   const marketVolume =
     active?.volume != null && active.volume > 0
       ? active.volume
@@ -239,8 +281,20 @@ export function EventOrderbook({
         : null;
   const marketTitle =
     active?.marketType === "moneyline"
-      ? "Moneyline"
-      : active?.marketType === "total"
+      ? shortLabel(active.label) === "YES" || shortLabel(active.label) === "NO"
+        ? "Moneyline"
+        : shortLabel(active.label)
+      : active?.marketType === "exact_score"
+        ? active.label || "Exact score"
+        : active?.marketType === "corners"
+          ? active.label || "Corners"
+          : active?.marketType === "btts"
+            ? "Both teams to score"
+            : active?.marketType === "half_result"
+              ? active.label || "Half result"
+              : active?.marketType === "first_goal"
+                ? active.label || "First goal"
+                : active?.marketType === "total"
         ? active.line && /O\/U/i.test(active.line)
           ? active.line
           : `O/U ${active.line ?? ""}`
@@ -249,7 +303,7 @@ export function EventOrderbook({
           : active?.marketType === "set_handicap"
             ? `Set Handicap${active.line ? ` ${active.line}` : ""}`
             : active?.marketType === "game_handicap"
-              ? `Game Spread${active.line ? ` ${active.line}` : ""}`
+              ? active.label || `Spread${active.line ? ` ${active.line}` : ""}`
               : active?.marketType === "completed_match"
                 ? "Completed Match"
                 : active?.marketType === "weather"
@@ -365,8 +419,11 @@ export function EventOrderbook({
         </button>
       </div>
 
-      {history.isLoading && !data ? (
-        <div className="panel-loading">Loading orderbook…</div>
+      {(history.isLoading && !sourceSnapshots.length) ||
+      (tab === "graph" && history.isLoading && !data?.snapshots?.length) ? (
+        <div className="panel-loading">
+          {tab === "graph" ? "Loading depth history…" : "Loading orderbook…"}
+        </div>
       ) : tab === "graph" ? (
         <OrderbookChart
           style={chartStyle}
@@ -385,7 +442,7 @@ export function EventOrderbook({
                     color: "#4d7cff",
                     snapshots:
                       chartPair[0].tokenId === resolvedId
-                        ? (data?.snapshots ?? [])
+                        ? sourceSnapshots
                         : (pairHistory.data?.snapshots ?? []),
                   },
                   {
@@ -397,7 +454,7 @@ export function EventOrderbook({
                     color: "#e8a838",
                     snapshots:
                       chartPair[1].tokenId === resolvedId
-                        ? (data?.snapshots ?? [])
+                        ? sourceSnapshots
                         : (pairHistory.data?.snapshots ?? []),
                   },
                 ]
@@ -406,14 +463,15 @@ export function EventOrderbook({
                     key: resolvedId,
                     label: scrubberLabel ? shortLabel(scrubberLabel) : "Price",
                     color: "#4d7cff",
-                    snapshots: data?.snapshots ?? [],
+                    snapshots: sourceSnapshots,
                   },
                 ]
           }
         />
       ) : (
         <OrderbookScrubber
-          snapshots={data?.snapshots ?? []}
+          key={`${sport ?? "x"}:${resolvedId}`}
+          snapshots={sourceSnapshots}
           outcomeLabel={scrubberLabel}
           startAtBeginning={eventFinished}
           matchStart={matchStart}
@@ -421,6 +479,7 @@ export function EventOrderbook({
           seekAt={seekAt}
           onFrame={handleFrame}
           sport={sport}
+          clockSport={scrubClockSport}
         />
       )}
     </section>

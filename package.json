@@ -6,6 +6,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "download": "tsx src/index.ts",
+    "download:predictfun": "tsx src/app/download-predictfun.ts",
     "history": "tsx src/index.ts",
     "typecheck": "tsc --noEmit"
   },

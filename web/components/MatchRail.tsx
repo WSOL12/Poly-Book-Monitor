@@ -57,8 +57,8 @@ export function MatchRail({
       const body = (await res.json()) as { events: EventRow[] };
       return body.events;
     },
-    refetchInterval: 5_000,
-    staleTime: 4_000,
+    refetchInterval: 15_000,
+    staleTime: 12_000,
   });
 
   const { open, live, retired, canceled, finished } = useMemo(
@@ -233,11 +233,20 @@ export function MatchRail({
                       scroll={false}
                       className={`match-rail-item${on ? " match-rail-item-on" : ""}${
                         phase === "open" || phase === "live" ? " match-rail-item-live" : ""
+                      }${event.hasTwin ? " match-rail-item-twin" : ""}`}
+                      title={`${event.title} · ${league}${event.volume ? ` · ${formatVolume(event.volume)}` : ""}${
+                        event.hasTwin ? " · Predict.fun twin" : ""
                       }`}
-                      title={`${event.title} · ${league}${event.volume ? ` · ${formatVolume(event.volume)}` : ""}`}
                     >
                       <span className="match-rail-top">
-                        <span className="match-rail-title">{shortTitle(event.title)}</span>
+                        <span className="match-rail-title-row">
+                          <span className="match-rail-title">{shortTitle(event.title)}</span>
+                          {event.hasTwin ? (
+                            <span className="twin-badge twin-badge-rail" title="Matched on Predict.fun">
+                              PF
+                            </span>
+                          ) : null}
+                        </span>
                         {result ? <span className="match-rail-score mono">{result}</span> : null}
                       </span>
                       <span className="match-rail-meta mono">

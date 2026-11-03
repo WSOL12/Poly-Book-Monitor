@@ -1,4 +1,4 @@
-import { listEvents, refreshPolyStatuses, type Sport } from "@/lib/db";
+import { listEvents, refreshPolyStatuses, withTwinFlags, type Sport } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -23,15 +23,23 @@ function schedulePolyRefresh() {
 
 export async function GET(req: Request) {
   schedulePolyRefresh();
-  const sport = new URL(req.url).searchParams.get("sport");
+  const url = new URL(req.url);
+  const sport = url.searchParams.get("sport");
+  const wantTwins = url.searchParams.get("twins") !== "0";
   const rows = listEvents(
     sport === "soccer" ||
       sport === "football" ||
       sport === "mlb" ||
       sport === "weather" ||
-      sport === "tennis"
+      sport === "tennis" ||
+      sport === "predictfun"
       ? (sport as Sport)
       : undefined
   );
-  return Response.json({ events: rows });
+  // Predict.fun is a venue shard, not a sport — never mix into the All-matches list.
+  const filtered =
+    sport === "predictfun" ? rows : rows.filter((e) => e.sport !== "predictfun");
+  // Twin flags are cached/indexed; still optional so clients can skip on cold path.
+  const events = wantTwins ? withTwinFlags(filtered) : filtered.map((e) => ({ ...e, hasTwin: false }));
+  return Response.json({ events });
 }
